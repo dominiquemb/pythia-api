@@ -7,7 +7,8 @@ const fetch = require("node-fetch"); // Use node-fetch for making requests in No
 const axios = require("axios");
 const mariadb = require("mariadb"); // Import the MariaDB package
 const sweph = require("swisseph"); // Import Swiss Ephemeris for astrological calculations
-const { DateTime } = require("luxon"); // <<< ADD THIS LINE
+const { DateTime } = require("luxon");
+const cityTimezones = require("city-timezones");
 
 // 2. Initialize the Express app
 const app = express();
@@ -30,8 +31,508 @@ const pool = mariadb.createPool({
   insertIdAsNumber: true,
 });
 
-app.get("/api/events/:userId", async (req, res) => {
+// --- Helper Functions ---
+
+/**
+ * Determines the zodiac sign and degree within that sign from a celestial longitude.
+ * @param {number} longitude - The celestial longitude in degrees (0-360).
+ * @returns {{sign: string, degrees: number}} - The zodiac sign and the degree within it.
+ */
+const getZodiacSign = (longitude) => {
+  const signs = [
+    "Aries",
+    "Taurus",
+    "Gemini",
+    "Cancer",
+    "Leo",
+    "Virgo",
+    "Libra",
+    "Scorpio",
+    "Sagittarius",
+    "Capricorn",
+    "Aquarius",
+    "Pisces",
+  ];
+  const signIndex = Math.floor(longitude / 30);
+  const degreesInSign = longitude % 30;
+  return {
+    sign: signs[signIndex],
+    degrees: degreesInSign,
+  };
+};
+
+/**
+ * Determines the house placement of a celestial body.
+ * @param {number} longitude - The celestial longitude of the planet.
+ * @param {Array<number>} houseCusps - An array of 12 house cusp longitudes.
+ * @returns {number | null} - The house number (1-12) or null if not found.
+ */
+const getHousePlacement = (longitude, houseCusps) => {
+  if (!houseCusps || houseCusps.length < 12) return null;
+  for (let i = 0; i < 12; i++) {
+    const cusp1 = houseCusps[i];
+    const cusp2 = houseCusps[(i + 1) % 12]; // Next cusp, wraps around from 12 to 1
+    if (cusp1 > cusp2) {
+      // Handle the case where the house crosses the 0° Aries point
+      if (longitude >= cusp1 || longitude < cusp2) return i + 1;
+    } else {
+      if (longitude >= cusp1 && longitude < cusp2) return i + 1;
+    }
+  }
+  return null;
+};
+
+/**
+ * Main helper function to perform all astrological calculations.
+ * @param {number} year - The year of the event.
+ * @param {number} month - The month of the event.
+ * @param {number} day - The day of the event.
+ * @param {string} time - The time of the event (e.g., "14:30").
+ * @param {string} location - The location of the event.
+ * @returns {Promise<object>} - A promise that resolves to the complete chart data object.
+ * @throws {Error} - Throws an error if any part of the calculation fails.
+ */
+async function calculateChart(
+  year,
+  month,
+  day,
+  time,
+  location,
+  includeHouses = true, // ✅ New optional parameter
+  houseSystem = "P" // Default house system
+) {
+  // --- 1. Geocoding and Timezone Conversion ---
+  // This step is still needed to convert the local time to the correct Universal Time (UT),
+  // as the timezone is derived from the location.
+  const geocodingApiKey = process.env.GEOCODING_API_KEY;
+  if (!geocodingApiKey) {
+    throw new Error("GEOCODING_API_KEY not found on the server.");
+  }
+
+  const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
+    location
+  )}&key=${geocodingApiKey}`;
+  const geocodeResponse = await axios.get(geocodeUrl);
+  const geoData = geocodeResponse.data;
+
+  if (geoData.status !== "OK" || !geoData.results[0]) {
+    throw new Error("Could not geocode the provided location.");
+  }
+
+  const { lat, lng } = geoData.results[0].geometry.location;
+  const formattedLocation = geoData.results[0].formatted_address;
+
+  const isoString = `${year}-${String(month).padStart(2, "0")}-${String(
+    day
+  ).padStart(2, "0")}T${time}`;
+  const localTime = DateTime.fromISO(isoString);
+
+  const timezoneUrl = `https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lng}&timestamp=${localTime.toSeconds()}&key=${geocodingApiKey}`;
+  const timezoneResponse = await axios.get(timezoneUrl);
+  const tzData = timezoneResponse.data;
+
+  if (tzData.status !== "OK") {
+    throw new Error("Could not determine the timezone for the location.");
+  }
+
+  const utcTime = DateTime.fromISO(isoString, {
+    zone: tzData.timeZoneId,
+  }).toUTC();
+  if (!utcTime.isValid) {
+    throw new Error(`Invalid date or time provided: ${utcTime.invalidReason}`);
+  }
+
+  // --- 2. Astrological Calculations using Swiss Ephemeris ---
+  sweph.swe_set_ephe_path(__dirname + "/ephe");
+
+  const julianDayUT = sweph.swe_julday(
+    utcTime.year,
+    utcTime.month,
+    utcTime.day,
+    utcTime.hour + utcTime.minute / 60 + utcTime.second / 3600,
+    sweph.SE_GREG_CAL
+  );
+
+  const chartData = {
+    meta: {
+      date: utcTime.toFormat("yyyy-MM-dd HH:mm:ss 'UTC'"),
+      location: formattedLocation,
+      latitude: lat,
+      longitude: lng,
+      inputs: { year, month, day, time, location },
+    },
+    positions: {},
+    houses: null, // Default to null
+    aspects: [],
+  };
+
+  // --- 3. House Calculation (Now Conditional) ---
+  if (includeHouses) {
+    const housesResult = sweph.swe_houses(julianDayUT, lat, lng, houseSystem);
+    if (housesResult.error) {
+      throw new Error(`House calculation failed: ${housesResult.error}`);
+    }
+    chartData.houses = {
+      system: houseSystem,
+      ascendant: housesResult.asc,
+      mc: housesResult.mc,
+      cusps: housesResult.house.slice(0, 12),
+    };
+  }
+
+  // --- 4. Planet Calculation ---
+  const planets = {
+    Sun: sweph.SE_SUN,
+    Moon: sweph.SE_MOON,
+    Mercury: sweph.SE_MERCURY,
+    Venus: sweph.SE_VENUS,
+    Mars: sweph.SE_MARS,
+    Jupiter: sweph.SE_JUPITER,
+    Saturn: sweph.SE_SATURN,
+    Uranus: sweph.SE_URANUS,
+    Neptune: sweph.SE_NEPTUNE,
+    Pluto: sweph.SE_PLUTO,
+    "North Node": sweph.SE_TRUE_NODE,
+    Chiron: sweph.SE_CHIRON,
+  };
+
+  for (const [name, id] of Object.entries(planets)) {
+    const result = sweph.swe_calc_ut(
+      julianDayUT,
+      id,
+      sweph.SEFLG_SPEED | sweph.SEFLG_JPLEPH
+    );
+    if (result.error) {
+      console.warn(`Swiss Ephemeris warning for ${name}:`, result.error);
+      continue;
+    }
+    const signInfo = getZodiacSign(result.longitude);
+
+    // Build the position data object
+    const positionData = {
+      longitude: result.longitude,
+      latitude: result.latitude,
+      speed: result.speed,
+      sign: signInfo.sign,
+      sign_degrees: signInfo.degrees,
+    };
+
+    // ✅ Conditionally add house placement
+    if (includeHouses && chartData.houses) {
+      positionData.house = getHousePlacement(
+        result.longitude,
+        chartData.houses.cusps
+      );
+    }
+
+    chartData.positions[name] = positionData;
+  }
+
+  // --- 5. Aspect Calculation (Unaffected by houses) ---
+  const aspectTypes = {
+    conjunction: { angle: 0, orb: 8, color: "#4a4a4a" },
+    opposition: { angle: 180, orb: 8, color: "#ff4d4d" },
+    trine: { angle: 120, orb: 8, color: "#2b8a3e" },
+    square: { angle: 90, orb: 8, color: "#e03131" },
+    sextile: { angle: 60, orb: 6, color: "#1c7ed6" },
+    quincunx: { angle: 150, orb: 3, color: "#f08c00" },
+  };
+
+  const planetNames = Object.keys(chartData.positions);
+  for (let i = 0; i < planetNames.length; i++) {
+    for (let j = i + 1; j < planetNames.length; j++) {
+      const p1 = chartData.positions[planetNames[i]];
+      const p2 = chartData.positions[planetNames[j]];
+      if (!p1 || !p2) continue;
+      let angle = Math.abs(p1.longitude - p2.longitude);
+      if (angle > 180) angle = 360 - angle;
+      for (const aspectName in aspectTypes) {
+        const aspect = aspectTypes[aspectName];
+        if (Math.abs(angle - aspect.angle) <= aspect.orb) {
+          chartData.aspects.push({
+            planet1: planetNames[i],
+            planet2: planetNames[j],
+            aspect: aspectName,
+            orb: Math.abs(angle - aspect.angle),
+            color: aspect.color,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  // --- 6. Cleanup ---
+  sweph.swe_close();
+
+  return chartData;
+}
+
+/**
+ * Fetches all events from the database and recalculates their chart data.
+ * This is useful for updating all charts after changing the calculation logic.
+ */
+async function recalculateAllChartsOnStartup() {
+  console.log("Starting recalculation of all saved astro charts...");
   let conn;
+  try {
+    conn = await pool.getConnection();
+
+    // 1. Fetch all existing events
+    const [events] = await conn.query(
+      "SELECT event_id, event_data FROM astro_event_data"
+    );
+    if (events.length === 0) {
+      console.log("No saved charts to recalculate. Startup complete.");
+      return;
+    }
+
+    console.log(`Found ${events.length} charts to process.`);
+
+    // 2. Loop through each event and recalculate
+    for (const event of events) {
+      try {
+        const eventId = event.event_id;
+        const data = JSON.parse(event.event_data);
+        const inputs = data.meta.inputs;
+
+        // Ensure the old record has the necessary input data
+        if (
+          !inputs ||
+          !inputs.year ||
+          !inputs.month ||
+          !inputs.day ||
+          !inputs.time ||
+          !inputs.location
+        ) {
+          console.warn(
+            `Skipping event ID ${eventId}: Missing input data for recalculation.`
+          );
+          continue;
+        }
+
+        console.log(`Recalculating chart for event ID: ${eventId}...`);
+
+        // 3. Use the helper to get new chart data
+        const recalculatedChartData = await calculateChart(
+          inputs.year,
+          inputs.month,
+          inputs.day,
+          inputs.time,
+          inputs.location
+        );
+
+        // 4. Update the record in the database
+        const updateQuery =
+          "UPDATE astro_event_data SET event_data = ? WHERE event_id = ?";
+        await conn.query(updateQuery, [
+          JSON.stringify(recalculatedChartData),
+          eventId,
+        ]);
+      } catch (recalcError) {
+        // Log error for a specific chart but continue with the next one
+        console.error(
+          `❌ Failed to recalculate chart for event ID ${event.event_id}:`,
+          recalcError.message
+        );
+      }
+    }
+
+    console.log("✅ Chart recalculation process finished successfully.");
+  } catch (err) {
+    console.error(
+      "A critical error occurred during the chart recalculation process:",
+      err.message
+    );
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
+app.put("/api/astro-event/:eventId", async (req, res) => {
+  const { authorization } = req.headers;
+
+  let conn;
+  if (!authorization) {
+    return res.status(400).json({
+      response:
+        "Missing JWT token in Authorization header. Please provide a valid JWT token",
+    });
+  }
+
+  const verified = await supabase.auth.getUser(authorization);
+  if (!verified?.data?.user) {
+    return res.status(400).json({
+      response: "Invalid JWT token",
+    });
+  }
+
+  // Security check: ensure the requesting user is the one they're asking for data about
+  if (verified.data.user.id !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: You can only request your own data.",
+    });
+  }
+  try {
+    const { eventId } = req.params;
+    const updatedFields = req.body;
+
+    if (!eventId || isNaN(parseInt(eventId))) {
+      return res
+        .status(400)
+        .json({ error: "A valid eventId must be provided." });
+    }
+
+    // --- Fetch Existing Event to Merge Data ---
+    conn = await pool.getConnection();
+    const [rows] = await conn.query(
+      "SELECT event_data, label FROM astro_event_data WHERE event_id = ?",
+      [eventId]
+    );
+    if (rows.length === 0) {
+      return res
+        .status(404)
+        .json({ error: `Event with ID ${eventId} not found.` });
+    }
+
+    const existingData = JSON.parse(rows[0].event_data);
+    const existingLabel = rows[0].label;
+
+    // Merge existing data with updated fields
+    const newInputs = { ...existingData.meta.inputs, ...updatedFields };
+    const newLabel = updatedFields.label || existingLabel;
+
+    // --- Recalculate Chart Data ---
+    const { year, month, day, time, location } = newInputs;
+    if (!year || !month || !day || !time || !location) {
+      return res.status(400).json({
+        error: "Update would result in missing date, time, or location.",
+      });
+    }
+    const recalculatedChartData = await calculateChart(
+      year,
+      month,
+      day,
+      time,
+      location
+    );
+
+    // --- Update Database ---
+    const updateQuery = `
+      UPDATE astro_event_data 
+      SET label = ?, event_data = ? 
+      WHERE event_id = ?;
+    `;
+    await conn.query(updateQuery, [
+      newLabel,
+      JSON.stringify(recalculatedChartData),
+      eventId,
+    ]);
+
+    recalculatedChartData.event_id = parseInt(eventId);
+    res.status(200).json(recalculatedChartData);
+  } catch (err) {
+    console.error(`PUT /api/astro-event Error:`, err.message);
+    res.status(500).json({
+      error: "An error occurred while updating the event.",
+      details: err.message,
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+app.delete("/api/astro-event/:eventId", async (req, res) => {
+  const { authorization } = req.headers;
+
+  let conn;
+  if (!authorization) {
+    return res.status(400).json({
+      response:
+        "Missing JWT token in Authorization header. Please provide a valid JWT token",
+    });
+  }
+
+  const verified = await supabase.auth.getUser(authorization);
+  if (!verified?.data?.user) {
+    return res.status(400).json({
+      response: "Invalid JWT token",
+    });
+  }
+
+  // Security check: ensure the requesting user is the one they're asking for data about
+  if (verified.data.user.id !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: You can only request your own data.",
+    });
+  }
+  try {
+    const { eventId } = req.params;
+
+    // --- Validation ---
+    if (!eventId || isNaN(parseInt(eventId))) {
+      return res
+        .status(400)
+        .json({ error: "A valid eventId must be provided in the URL." });
+    }
+
+    // --- Database Deletion ---
+    conn = await pool.getConnection();
+    const deleteQuery = `
+      DELETE FROM astro_event_data 
+      WHERE event_id = ?;
+    `;
+    const result = await conn.query(deleteQuery, [eventId]);
+
+    // Check if a row was deleted
+    if (result.affectedRows === 0) {
+      return res
+        .status(404)
+        .json({ error: `Event with ID ${eventId} not found.` });
+    }
+
+    // --- Send Success Response ---
+    res
+      .status(200)
+      .json({ message: `Event with ID ${eventId} was deleted successfully.` });
+  } catch (err) {
+    console.error("Delete Event Error:", err.message);
+    res.status(500).json({
+      error: "An error occurred while deleting the event.",
+      details: err.message,
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+app.get("/api/events/:userId", async (req, res) => {
+  const { authorization } = req.headers;
+
+  let conn;
+  if (!authorization) {
+    return res.status(400).json({
+      response:
+        "Missing JWT token in Authorization header. Please provide a valid JWT token",
+    });
+  }
+
+  const verified = await supabase.auth.getUser(authorization);
+  if (!verified?.data?.user) {
+    return res.status(400).json({
+      response: "Invalid JWT token",
+    });
+  }
+
+  // Security check: ensure the requesting user is the one they're asking for data about
+  if (verified.data.user.id !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: You can only request your own data.",
+    });
+  }
   try {
     const { userId } = req.params;
 
@@ -86,231 +587,96 @@ app.get("/api/events/:userId", async (req, res) => {
 });
 
 app.post("/api/natal-chart", async (req, res) => {
-  let conn; // Define connection variable to be accessible in the finally block
+  const { authorization } = req.headers;
+
+  let conn;
+  if (!authorization) {
+    return res.status(400).json({
+      response:
+        "Missing JWT token in Authorization header. Please provide a valid JWT token",
+    });
+  }
+
+  const verified = await supabase.auth.getUser(authorization);
+  if (!verified?.data?.user) {
+    return res.status(400).json({
+      response: "Invalid JWT token",
+    });
+  }
+
+  // Security check: ensure the requesting user is the one they're asking for data about
+  if (verified.data.user.id !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: You can only request your own data.",
+    });
+  }
+
   try {
-    // 1. Destructure all data from the request body, including userId and label
     const { userId, label, year, month, day, time, location } = req.body;
-
-    // --- Validation for all required fields ---
     if (!userId || !label || !year || !month || !day || !time || !location) {
-      return res.status(400).json({
-        error:
-          "Missing required fields (userId, label, year, month, day, time, location).",
-      });
+      return res.status(400).json({ error: "Missing required fields." });
     }
 
-    // --- Geocoding and Timezone Conversion ---
-    const geocodingApiKey = process.env.GEOCODING_API_KEY;
-    if (!geocodingApiKey) {
-      return res
-        .status(500)
-        .json({ error: "GEOCODING_API_KEY not found on the server." });
-    }
+    // Use the reusable helper to get all chart data
+    const chartData = await calculateChart(year, month, day, time, location);
 
-    const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
-      location
-    )}&key=${geocodingApiKey}`;
-    const geocodeResponse = await axios.get(geocodeUrl);
-    const geoData = geocodeResponse.data;
-
-    if (geoData.status !== "OK" || !geoData.results[0]) {
-      return res
-        .status(400)
-        .json({ error: "Could not geocode the provided location." });
-    }
-
-    const { lat, lng } = geoData.results[0].geometry.location;
-    const formattedLocation = geoData.results[0].formatted_address;
-
-    const isoString = `${year}-${String(month).padStart(2, "0")}-${String(
-      day
-    ).padStart(2, "0")}T${time}`;
-    const localBirthTime = DateTime.fromISO(isoString);
-
-    const timezoneUrl = `https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lng}&timestamp=${localBirthTime.toSeconds()}&key=${geocodingApiKey}`;
-    const timezoneResponse = await axios.get(timezoneUrl);
-    const tzData = timezoneResponse.data;
-
-    if (tzData.status !== "OK") {
-      return res
-        .status(500)
-        .json({ error: "Could not determine the timezone for the location." });
-    }
-
-    const utcBirthTime = DateTime.fromISO(isoString, {
-      zone: tzData.timeZoneId,
-    }).toUTC();
-
-    if (!utcBirthTime.isValid) {
-      return res.status(400).json({
-        error: "Invalid date or time provided.",
-        details: utcBirthTime.invalidReason,
-      });
-    }
-
-    // --- Astrological Calculations using Swiss Ephemeris ---
-    sweph.swe_set_ephe_path(__dirname + "/ephe");
-
-    const julianDayUT = sweph.swe_julday(
-      utcBirthTime.year,
-      utcBirthTime.month,
-      utcBirthTime.day,
-      utcBirthTime.hour + utcBirthTime.minute / 60 + utcBirthTime.second / 3600,
-      sweph.SE_GREG_CAL
-    );
-
-    const planets = {
-      Sun: sweph.SE_SUN,
-      Moon: sweph.SE_MOON,
-      Mercury: sweph.SE_MERCURY,
-      Venus: sweph.SE_VENUS,
-      Mars: sweph.SE_MARS,
-      Jupiter: sweph.SE_JUPITER,
-      Saturn: sweph.SE_SATURN,
-      Uranus: sweph.SE_URANUS,
-      Neptune: sweph.SE_NEPTUNE,
-      Pluto: sweph.SE_PLUTO,
-      "North Node": sweph.SE_TRUE_NODE,
-      Chiron: sweph.SE_CHIRON,
-    };
-
-    const chartData = {
-      meta: {
-        date: utcBirthTime.toFormat("yyyy-MM-dd HH:mm:ss 'UTC'"),
-        location: formattedLocation,
-        latitude: lat,
-        longitude: lng,
-      },
-      positions: {},
-    };
-
-    for (const [name, id] of Object.entries(planets)) {
-      const result = sweph.swe_calc_ut(
-        julianDayUT,
-        id,
-        sweph.SEFLG_SPEED | sweph.SEFLG_JPLEPH // Using JPL Ephemeris
-      );
-      if (result.error) {
-        console.error(`Swiss Ephemeris error for ${name}:`, result.error);
-        chartData.positions[name] = { error: result.error };
-      } else {
-        chartData.positions[name] = {
-          longitude: result.longitude,
-          latitude: result.latitude,
-          speed: result.longitude_speed,
-        };
-      }
-    }
-
-    const houseSystem = "P";
-    const houses = sweph.swe_houses(julianDayUT, lat, lng, houseSystem);
-
-    if (houses.error || !houses.house) {
-      console.error("Could not calculate house cusps:", houses.error);
-      chartData.houses = { error: "House calculation failed." };
-    } else {
-      chartData.houses = {
-        system: houseSystem,
-        ascendant: houses.asc,
-        mc: houses.mc,
-        cusps: {
-          1: houses.house[0],
-          2: houses.house[1],
-          3: houses.house[2],
-          4: houses.house[3],
-          5: houses.house[4],
-          6: houses.house[5],
-          7: houses.house[6],
-          8: houses.house[7],
-          9: houses.house[8],
-          10: houses.house[9],
-          11: houses.house[10],
-          12: houses.house[11],
-        },
-      };
-    }
-
-    const aspects = {
-      conjunction: { angle: 0, orb: 8, color: "#4a4a4a" },
-      opposition: { angle: 180, orb: 8, color: "#ff4d4d" },
-      trine: { angle: 120, orb: 8, color: "#2b8a3e" },
-      square: { angle: 90, orb: 8, color: "#e03131" },
-      sextile: { angle: 60, orb: 6, color: "#1c7ed6" },
-      quincunx: { angle: 150, orb: 3, color: "#f08c00" },
-      quintile: { angle: 72, orb: 2, color: "#862e9c" },
-      semisextile: { angle: 30, orb: 2, color: "#495057" },
-      semisquare: { angle: 45, orb: 2, color: "#c92a2a" },
-    };
-
-    const planetNames = Object.keys(chartData.positions);
-    const calculatedAspects = [];
-
-    for (let i = 0; i < planetNames.length; i++) {
-      for (let j = i + 1; j < planetNames.length; j++) {
-        const planet1 = chartData.positions[planetNames[i]];
-        const planet2 = chartData.positions[planetNames[j]];
-        if (!planet1 || planet1.error || !planet2 || planet2.error) continue;
-        let angle = Math.abs(planet1.longitude - planet2.longitude);
-        if (angle > 180) angle = 360 - angle;
-        for (const aspectName in aspects) {
-          const aspect = aspects[aspectName];
-          if (Math.abs(angle - aspect.angle) <= aspect.orb) {
-            calculatedAspects.push({
-              planet1: planetNames[i],
-              planet2: planetNames[j],
-              aspect: aspectName,
-              orb: Math.abs(angle - aspect.angle),
-              color: aspect.color,
-            });
-            break;
-          }
-        }
-      }
-    }
-    chartData.aspects = calculatedAspects;
-
-    // --- ✅ NEW: Save Event to Database ---
+    // --- Save to Database ---
     conn = await pool.getConnection();
     const insertQuery = `
       INSERT INTO astro_event_data (user_id, label, event_data) 
       VALUES (?, ?, ?);
     `;
-    // Convert the complete chart data object to a JSON string for storage
     const eventDataString = JSON.stringify(chartData);
     const dbResult = await conn.query(insertQuery, [
       userId,
       label,
       eventDataString,
     ]);
-
-    // Add the new event_id to the response for the client's reference
     chartData.event_id = Number(dbResult.insertId);
 
-    // --- Send Response ---
-    // Use 201 Created status code for successful resource creation
     res.status(201).json(chartData);
   } catch (err) {
-    console.error("Natal Chart Error:", err.message);
+    console.error("POST /api/natal-chart Error:", err.message);
     res.status(500).json({
-      error: "An error occurred while calculating and saving the natal chart.",
+      error: "An error occurred while creating the natal chart.",
       details: err.message,
     });
   } finally {
-    // Ensure the database connection is released if it was acquired
     if (conn) conn.release();
-    // Close the Swiss Ephemeris files
-    sweph.swe_close();
   }
 });
 
-// 5. Define the API route
 app.post("/api/query", async (req, res) => {
+  const { authorization } = req.headers;
+  // Destructure the data sent from the React frontend, now including the userId
+  const { userId, chartData, userQuestion } = req.body;
+
   let conn; // Declare a variable for the database connection
 
-  try {
-    // Destructure the data sent from the React frontend, now including the userId
-    const { userId, chartData, userQuestion } = req.body;
+  if (!authorization) {
+    return res.status(400).json({
+      response:
+        "Missing JWT token in Authorization header. Please provide a valid JWT token",
+    });
+  }
 
+  const verified = await supabase.auth.getUser(authorization);
+  if (!verified?.data?.user) {
+    return res.status(400).json({
+      response: "Invalid JWT token",
+    });
+  }
+
+  // Security check: ensure the requesting user is the one they're asking for data about
+  if (verified.data.user.id !== userId) {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: You can only request your own data.",
+    });
+  }
+
+  try {
     // Securely get the API key from the server's environment variables
     const apiKey = process.env.GEMINI_API_KEY;
 
@@ -425,4 +791,8 @@ app.post("/api/query", async (req, res) => {
 // 6. Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+
+  // Call the recalculation function immediately after the server starts.
+  // It will run in the background and not block the server from accepting requests.
+  recalculateAllChartsOnStartup();
 });
