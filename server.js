@@ -37,31 +37,51 @@ const pool = mariadb.createPool({
 
 // A helper function to log key chart placements in a readable format
 function logChartSummary(chart, title = "Chart Summary") {
-  if (!chart || !chart.positions) {
+  if (!chart) {
     console.log(`-- ${title}: Invalid chart data provided --`);
     return;
   }
 
-  const sun = chart.positions.Sun;
-  const moon = chart.positions.Moon;
-  // Houses are optional, so we check if they exist
-  const ascendant = chart.houses ? chart.houses.ascendant : null;
+  console.log(`\n--- ${title} ---`);
 
-  console.log(`--- ${title} ---`);
-  if (sun) {
-    console.log(`Sun: ${sun.sign_degrees.toFixed(2)}° ${sun.sign}`);
+  // Log Angles (Ascendant & MC) if the chart has houses
+  if (chart.houses && chart.houses.ascendant) {
+    const asc = getZodiacSign(chart.houses.ascendant);
+    const mc = getZodiacSign(chart.houses.mc);
+    console.log(`Ascendant: ${asc.degrees.toFixed(2)}° ${asc.sign}`);
+    console.log(`MC:        ${mc.degrees.toFixed(2)}° ${mc.sign}`);
+    console.log(`---------------------------------`);
   }
-  if (moon) {
-    console.log(`Moon: ${moon.sign_degrees.toFixed(2)}° ${moon.sign}`);
+
+  // Log all planets and bodies from the positions object
+  if (chart.positions) {
+    const planetNames = Object.keys(chart.positions);
+    // Find the longest name for clean padding
+    const longestName = Math.max(...planetNames.map((name) => name.length));
+
+    for (const planetName of planetNames) {
+      const planetData = chart.positions[planetName];
+      if (
+        !planetData ||
+        typeof planetData.sign_degrees !== "number" ||
+        !planetData.sign
+      )
+        continue;
+
+      const paddedName = planetName.padEnd(longestName, " ");
+      const degrees = planetData.sign_degrees.toFixed(2).padStart(5, " ");
+      const sign = planetData.sign.padEnd(11, " ");
+
+      // Only show house if it exists on the object
+      const house = planetData.house
+        ? `(H${String(planetData.house).padStart(2, " ")})`
+        : "";
+
+      console.log(`${paddedName}: ${degrees}° ${sign} ${house}`);
+    }
   }
-  if (ascendant) {
-    // The ascendant is just a degree, so we need to get its sign
-    const ascSignInfo = getZodiacSign(ascendant);
-    console.log(
-      `Ascendant: ${ascSignInfo.degrees.toFixed(2)}° ${ascSignInfo.sign}`
-    );
-  }
-  console.log(`---------------------------------`);
+
+  console.log(`---------------------------------\n`);
 }
 
 /**
