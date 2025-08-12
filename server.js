@@ -268,10 +268,6 @@ async function calculateChart(
   return chartData;
 }
 
-/**
- * Fetches all events from the database and recalculates their chart data.
- * This is useful for updating all charts after changing the calculation logic.
- */
 async function recalculateAllChartsOnStartup() {
   console.log("🚀 Starting recalculation of all saved astro charts...");
   let conn;
@@ -286,7 +282,7 @@ async function recalculateAllChartsOnStartup() {
     if (queryResult) {
       if (Array.isArray(queryResult)) {
         events = queryResult;
-      } else {
+      } else if (typeof queryResult === "object" && queryResult !== null) {
         events = [queryResult];
       }
     }
@@ -302,16 +298,32 @@ async function recalculateAllChartsOnStartup() {
     for (const event of events) {
       try {
         const eventId = event.event_id;
-
-        // ✅ CORRECTED: Check if event_data is a string before parsing
         let data;
         if (typeof event.event_data === "string") {
           data = JSON.parse(event.event_data);
         } else {
-          data = event.event_data; // It's already an object, use it directly
+          data = event.event_data;
         }
 
-        const inputs = data.meta.inputs;
+        // ✅ CORRECTED: Add fallback logic to handle old chart data
+        let inputs;
+        if (data.meta && data.meta.inputs) {
+          // Use the new format if it exists
+          inputs = data.meta.inputs;
+        } else if (data.meta && data.meta.date && data.meta.location) {
+          // Fallback for old data: reconstruct inputs from existing meta fields
+          console.log(
+            `Event ID ${eventId} is old format, reconstructing inputs...`
+          );
+          const utcDate = DateTime.fromISO(data.meta.date, { zone: "utc" });
+          inputs = {
+            year: utcDate.year,
+            month: utcDate.month,
+            day: utcDate.day,
+            time: utcDate.toFormat("HH:mm:ss"),
+            location: data.meta.location,
+          };
+        }
 
         if (
           !inputs ||
@@ -322,7 +334,7 @@ async function recalculateAllChartsOnStartup() {
           !inputs.location
         ) {
           console.warn(
-            `Skipping event ID ${eventId}: Missing input data for recalculation.`
+            `Skipping event ID ${eventId}: Missing input data even after fallback.`
           );
           continue;
         }
@@ -343,6 +355,10 @@ async function recalculateAllChartsOnStartup() {
           JSON.stringify(recalculatedChartData),
           eventId,
         ]);
+
+        console.log(
+          `✅ Successfully recalculated chart for event ID: ${eventId}`
+        );
       } catch (recalcError) {
         console.error(
           `❌ Failed to recalculate chart for event ID ${event.event_id}:`,
@@ -351,7 +367,7 @@ async function recalculateAllChartsOnStartup() {
       }
     }
 
-    console.log("✅ Chart recalculation process finished successfully.");
+    console.log("✨ Chart recalculation process finished successfully.");
   } catch (err) {
     console.error(
       "A critical error occurred during the chart recalculation process:",
