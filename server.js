@@ -1,5 +1,3 @@
-// server.js
-
 // 1. Import necessary packages
 const express = require("express");
 const cors = require("cors");
@@ -9,6 +7,10 @@ const mariadb = require("mariadb"); // Import the MariaDB package
 const sweph = require("swisseph"); // Import Swiss Ephemeris for astrological calculations
 const { DateTime } = require("luxon");
 const cityTimezones = require("city-timezones");
+const { createClient } = require("@supabase/supabase-js");
+
+const supabaseUrl = "https://dldezknthsmgskwvhqtk.supabase.co";
+const supabase = createClient(supabaseUrl, process.env.SUPABASE_SECRET_KEY);
 
 // 2. Initialize the Express app
 const app = express();
