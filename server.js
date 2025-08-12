@@ -386,6 +386,7 @@ async function recalculateAllChartsOnStartup() {
 }
 app.put("/api/astro-event/:eventId", async (req, res) => {
   const { authorization } = req.headers;
+  const { eventId } = req.params;
 
   let conn;
   if (!authorization) {
@@ -410,7 +411,6 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     });
   }
   try {
-    const { eventId } = req.params;
     const updatedFields = req.body;
 
     if (!eventId || isNaN(parseInt(eventId))) {
@@ -480,6 +480,7 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
 
 app.delete("/api/astro-event/:eventId", async (req, res) => {
   const { authorization } = req.headers;
+  const { eventId } = req.params;
 
   let conn;
   if (!authorization) {
@@ -504,8 +505,6 @@ app.delete("/api/astro-event/:eventId", async (req, res) => {
     });
   }
   try {
-    const { eventId } = req.params;
-
     // --- Validation ---
     if (!eventId || isNaN(parseInt(eventId))) {
       return res
@@ -545,6 +544,7 @@ app.delete("/api/astro-event/:eventId", async (req, res) => {
 
 app.get("/api/events/:userId", async (req, res) => {
   const { authorization } = req.headers;
+  const { userId } = req.params;
 
   let conn;
   if (!authorization) {
@@ -569,8 +569,6 @@ app.get("/api/events/:userId", async (req, res) => {
     });
   }
   try {
-    const { userId } = req.params;
-
     if (!userId) {
       return res
         .status(400)
