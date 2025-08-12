@@ -273,17 +273,30 @@ async function calculateChart(
  * This is useful for updating all charts after changing the calculation logic.
  */
 async function recalculateAllChartsOnStartup() {
-  console.log("Starting recalculation of all saved astro charts...");
+  console.log("🚀 Starting recalculation of all saved astro charts...");
   let conn;
   try {
     conn = await pool.getConnection();
 
     // 1. Fetch all existing events
-    const [events] = await conn.query(
+    const queryResult = await conn.query(
       "SELECT event_id, event_data FROM astro_event_data"
     );
+
+    // ✅ CORRECTED: Normalize the result to always be an array.
+    // This handles the MariaDB driver returning a single object for one row.
+    let events = [];
+    if (queryResult) {
+      if (Array.isArray(queryResult)) {
+        events = queryResult; // It's already an array of multiple rows
+      } else {
+        events = [queryResult]; // It was a single object, wrap it in an array
+      }
+    }
+
     if (events.length === 0) {
       console.log("No saved charts to recalculate. Startup complete.");
+      if (conn) conn.release();
       return;
     }
 
@@ -293,10 +306,10 @@ async function recalculateAllChartsOnStartup() {
     for (const event of events) {
       try {
         const eventId = event.event_id;
+        // ... (rest of the logic is unchanged as it now reliably receives an array item)
         const data = JSON.parse(event.event_data);
         const inputs = data.meta.inputs;
 
-        // Ensure the old record has the necessary input data
         if (
           !inputs ||
           !inputs.year ||
@@ -313,7 +326,6 @@ async function recalculateAllChartsOnStartup() {
 
         console.log(`Recalculating chart for event ID: ${eventId}...`);
 
-        // 3. Use the helper to get new chart data
         const recalculatedChartData = await calculateChart(
           inputs.year,
           inputs.month,
@@ -322,7 +334,6 @@ async function recalculateAllChartsOnStartup() {
           inputs.location
         );
 
-        // 4. Update the record in the database
         const updateQuery =
           "UPDATE astro_event_data SET event_data = ? WHERE event_id = ?";
         await conn.query(updateQuery, [
@@ -330,7 +341,6 @@ async function recalculateAllChartsOnStartup() {
           eventId,
         ]);
       } catch (recalcError) {
-        // Log error for a specific chart but continue with the next one
         console.error(
           `❌ Failed to recalculate chart for event ID ${event.event_id}:`,
           recalcError.message
