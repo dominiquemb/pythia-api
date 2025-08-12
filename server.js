@@ -278,19 +278,16 @@ async function recalculateAllChartsOnStartup() {
   try {
     conn = await pool.getConnection();
 
-    // 1. Fetch all existing events
     const queryResult = await conn.query(
       "SELECT event_id, event_data FROM astro_event_data"
     );
 
-    // ✅ CORRECTED: Normalize the result to always be an array.
-    // This handles the MariaDB driver returning a single object for one row.
     let events = [];
     if (queryResult) {
       if (Array.isArray(queryResult)) {
-        events = queryResult; // It's already an array of multiple rows
+        events = queryResult;
       } else {
-        events = [queryResult]; // It was a single object, wrap it in an array
+        events = [queryResult];
       }
     }
 
@@ -302,12 +299,18 @@ async function recalculateAllChartsOnStartup() {
 
     console.log(`Found ${events.length} charts to process.`);
 
-    // 2. Loop through each event and recalculate
     for (const event of events) {
       try {
         const eventId = event.event_id;
-        // ... (rest of the logic is unchanged as it now reliably receives an array item)
-        const data = JSON.parse(event.event_data);
+
+        // ✅ CORRECTED: Check if event_data is a string before parsing
+        let data;
+        if (typeof event.event_data === "string") {
+          data = JSON.parse(event.event_data);
+        } else {
+          data = event.event_data; // It's already an object, use it directly
+        }
+
         const inputs = data.meta.inputs;
 
         if (
@@ -358,7 +361,6 @@ async function recalculateAllChartsOnStartup() {
     if (conn) conn.release();
   }
 }
-
 app.put("/api/astro-event/:eventId", async (req, res) => {
   const { authorization } = req.headers;
 
