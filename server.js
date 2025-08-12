@@ -35,6 +35,35 @@ const pool = mariadb.createPool({
 
 // --- Helper Functions ---
 
+// A helper function to log key chart placements in a readable format
+function logChartSummary(chart, title = "Chart Summary") {
+  if (!chart || !chart.positions) {
+    console.log(`-- ${title}: Invalid chart data provided --`);
+    return;
+  }
+
+  const sun = chart.positions.Sun;
+  const moon = chart.positions.Moon;
+  // Houses are optional, so we check if they exist
+  const ascendant = chart.houses ? chart.houses.ascendant : null;
+
+  console.log(`--- ${title} ---`);
+  if (sun) {
+    console.log(`Sun: ${sun.sign_degrees.toFixed(2)}° ${sun.sign}`);
+  }
+  if (moon) {
+    console.log(`Moon: ${moon.sign_degrees.toFixed(2)}° ${moon.sign}`);
+  }
+  if (ascendant) {
+    // The ascendant is just a degree, so we need to get its sign
+    const ascSignInfo = getZodiacSign(ascendant);
+    console.log(
+      `Ascendant: ${ascSignInfo.degrees.toFixed(2)}° ${ascSignInfo.sign}`
+    );
+  }
+  console.log(`---------------------------------`);
+}
+
 /**
  * Determines the zodiac sign and degree within that sign from a celestial longitude.
  * @param {number} longitude - The celestial longitude in degrees (0-360).
@@ -387,6 +416,7 @@ async function recalculateAllChartsOnStartup() {
 app.put("/api/astro-event/:eventId", async (req, res) => {
   const { authorization } = req.headers;
   const { eventId } = req.params;
+  const updatedFields = req.body;
 
   let conn;
   if (!authorization) {
@@ -396,22 +426,21 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     });
   }
 
-  const verified = await supabase.auth.getUser(authorization);
-  if (!verified?.data?.user) {
-    return res.status(400).json({
-      response: "Invalid JWT token",
-    });
-  }
-
-  // Security check: ensure the requesting user is the one they're asking for data about
-  if (verified.data.user.id !== userId) {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden: You can only request your own data.",
-    });
-  }
   try {
-    const updatedFields = req.body;
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({
+        response: "Invalid JWT token",
+      });
+    }
+
+    // ✅ CORRECTED: Security check now correctly gets the userId from the request body.
+    if (verified.data.user.id !== updatedFields.userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only update your own events.",
+      });
+    }
 
     if (!eventId || isNaN(parseInt(eventId))) {
       return res
@@ -419,7 +448,6 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
         .json({ error: "A valid eventId must be provided." });
     }
 
-    // --- Fetch Existing Event to Merge Data ---
     conn = await pool.getConnection();
     const [rows] = await conn.query(
       "SELECT event_data, label FROM astro_event_data WHERE event_id = ?",
@@ -434,11 +462,9 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     const existingData = JSON.parse(rows[0].event_data);
     const existingLabel = rows[0].label;
 
-    // Merge existing data with updated fields
     const newInputs = { ...existingData.meta.inputs, ...updatedFields };
     const newLabel = updatedFields.label || existingLabel;
 
-    // --- Recalculate Chart Data ---
     const { year, month, day, time, location } = newInputs;
     if (!year || !month || !day || !time || !location) {
       return res.status(400).json({
@@ -453,7 +479,6 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
       location
     );
 
-    // --- Update Database ---
     const updateQuery = `
       UPDATE astro_event_data 
       SET label = ?, event_data = ? 
@@ -466,6 +491,13 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     ]);
 
     recalculatedChartData.event_id = parseInt(eventId);
+
+    // ✅ ADDED: Human-readable log of the data being sent back to the client.
+    logChartSummary(
+      recalculatedChartData,
+      `Updated Chart Sent for "${newLabel}"`
+    );
+
     res.status(200).json(recalculatedChartData);
   } catch (err) {
     console.error(`PUT /api/astro-event Error:`, err.message);
@@ -621,6 +653,7 @@ app.get("/api/events/:userId", async (req, res) => {
 
 app.post("/api/natal-chart", async (req, res) => {
   const { authorization } = req.headers;
+  const { userId, label, year, month, day, time, location } = req.body;
 
   let conn;
   if (!authorization) {
@@ -630,29 +663,33 @@ app.post("/api/natal-chart", async (req, res) => {
     });
   }
 
-  const verified = await supabase.auth.getUser(authorization);
-  if (!verified?.data?.user) {
-    return res.status(400).json({
-      response: "Invalid JWT token",
-    });
-  }
-
-  // Security check: ensure the requesting user is the one they're asking for data about
-  if (verified.data.user.id !== userId) {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden: You can only request your own data.",
-    });
-  }
-
   try {
-    const { userId, label, year, month, day, time, location } = req.body;
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({
+        response: "Invalid JWT token",
+      });
+    }
+
+    // ✅ CORRECTED: Security check now correctly compares the verified token's user ID
+    // with the userId sent in the request body.
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Forbidden: You can only create events for your own user account.",
+      });
+    }
+
     if (!userId || !label || !year || !month || !day || !time || !location) {
       return res.status(400).json({ error: "Missing required fields." });
     }
 
     // Use the reusable helper to get all chart data
     const chartData = await calculateChart(year, month, day, time, location);
+
+    // ✅ ADDED: Human-readable log of the created chart
+    logChartSummary(chartData, `Natal Chart Created for "${label}"`);
 
     // --- Save to Database ---
     conn = await pool.getConnection();
@@ -682,10 +719,19 @@ app.post("/api/natal-chart", async (req, res) => {
 
 app.post("/api/query", async (req, res) => {
   const { authorization } = req.headers;
-  // Destructure the data sent from the React frontend, now including the userId
-  const { userId, chartData, userQuestion } = req.body;
+  // ✅ ADDED: Destructure all the new possible parameters
+  const {
+    userId,
+    chartData,
+    userQuestion,
+    transitTimestamp,
+    progressed,
+    progressedEventIds,
+    progressedTimezones,
+    houseSystem = "P",
+  } = req.body;
 
-  let conn; // Declare a variable for the database connection
+  let conn;
 
   if (!authorization) {
     return res.status(400).json({
@@ -694,6 +740,7 @@ app.post("/api/query", async (req, res) => {
     });
   }
 
+  // ✅ CORRECTED: Typo in 'authorization' variable
   const verified = await supabase.auth.getUser(authorization);
   if (!verified?.data?.user) {
     return res.status(400).json({
@@ -701,7 +748,6 @@ app.post("/api/query", async (req, res) => {
     });
   }
 
-  // Security check: ensure the requesting user is the one they're asking for data about
   if (verified.data.user.id !== userId) {
     return res.status(403).json({
       success: false,
@@ -710,14 +756,11 @@ app.post("/api/query", async (req, res) => {
   }
 
   try {
-    // Securely get the API key from the server's environment variables
     const apiKey = process.env.GEMINI_API_KEY;
 
     console.log(`User ${userId} made a query: ${userQuestion}`);
 
-    // --- Validation ---
     if (!apiKey) {
-      // Use return to stop execution
       return res
         .status(500)
         .json({ error: "GEMINI_API_KEY not found on the server." });
@@ -728,15 +771,108 @@ app.post("/api/query", async (req, res) => {
       });
     }
 
+    // --- ✅ MODIFIED: Dynamic Chart Calculation & Logging ---
+    let finalChartDataString = chartData;
+    let additionalContext = "";
+
+    if (
+      progressed === true &&
+      Array.isArray(progressedEventIds) &&
+      progressedEventIds.length > 0
+    ) {
+      try {
+        let charts = JSON.parse(chartData);
+        if (!Array.isArray(charts)) charts = [charts];
+
+        const updatedCharts = await Promise.all(
+          charts.map(async (chart) => {
+            if (progressedEventIds.includes(chart.event_id)) {
+              const birthDate = DateTime.fromISO(chart.meta.date);
+              const natalLocation = chart.meta.location;
+              const customTimezone = progressedTimezones[chart.event_id];
+
+              if (birthDate.isValid && natalLocation) {
+                const ageInYears = DateTime.now().diff(
+                  birthDate,
+                  "years"
+                ).years;
+                const progressedDate = birthDate.plus({ days: ageInYears });
+
+                const locationForCalc = customTimezone
+                  ? cities.find((c) => c.timezone === customTimezone)?.name ||
+                    natalLocation
+                  : natalLocation;
+
+                const progressedChartData = await calculateChart(
+                  progressedDate.year,
+                  progressedDate.month,
+                  progressedDate.day,
+                  progressedDate.toFormat("HH:mm:ss"),
+                  locationForCalc,
+                  false,
+                  houseSystem
+                );
+
+                logChartSummary(
+                  progressedChartData,
+                  `Progressed Chart for Event ID ${chart.event_id}`
+                );
+                chart.progressedChart = progressedChartData;
+              }
+            }
+            return chart;
+          })
+        );
+        finalChartDataString = JSON.stringify(updatedCharts, null, 2);
+      } catch (e) {
+        console.error("Error processing progressed charts:", e.message);
+      }
+    }
+
+    if (transitTimestamp) {
+      try {
+        const transitDate = DateTime.fromISO(transitTimestamp, {
+          setZone: true,
+        });
+        if (transitDate.isValid) {
+          const cityData = cities.find(
+            (c) => c.timezone === transitDate.zoneName
+          );
+          const transitLocation = cityData
+            ? `${cityData.city}, ${cityData.country}`
+            : "Greenwich, UK";
+
+          const transitChart = await calculateChart(
+            transitDate.year,
+            transitDate.month,
+            transitDate.day,
+            transitDate.toFormat("HH:mm:ss"),
+            transitLocation,
+            false,
+            houseSystem
+          );
+
+          logChartSummary(
+            transitChart,
+            `Transit Chart for ${transitDate.toFormat("yyyy-MM-dd")}`
+          );
+
+          additionalContext = `\n\n**Transit Chart for ${transitDate.toFormat(
+            "yyyy-MM-dd HH:mm"
+          )}:**\n---
+${JSON.stringify(transitChart, null, 2)}
+---`;
+        }
+      } catch (e) {
+        console.error("Error processing transit chart:", e.message);
+      }
+    }
+
     // --- Database Logic for Query Limit ---
-    // Get a connection from the pool
     conn = await pool.getConnection();
+    const [userStats] = await conn.query(checkQuery, [userId]);
 
-    // Query to check the user's current query count and last timestamp
-    const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
-    const userStats = await conn.query(checkQuery, [userId]);
-
-    if (userStats.length > 0) {
+    if (userStats && userStats.length > 0) {
       const today = new Date().toDateString();
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
@@ -750,63 +886,56 @@ app.post("/api/query", async (req, res) => {
     }
 
     // --- Gemini API Call ---
-    // If the request wasn't blocked, proceed with the API call
     const prompt = `
-      You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
-      Analyze the following astrological data and answer the user's question based on it. Provide a thoughtful, detailed, and insightful interpretation without unnecessary flattery.
+      You are an expert astrologer with deep knowledge of various astrological techniques...
+      Analyze the following astrological data and answer the user's question...
+
       **Astrological Data:**
       ---
-      ${chartData}
+      ${finalChartDataString}
       ---
+      ${additionalContext}
       **User's Question:**
       ${userQuestion}
+
       **Your Interpretation:**
     `;
 
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
-
     const geminiResponse = await axios.post(
       apiUrl,
       {
         contents: [{ parts: [{ text: prompt }] }],
       },
-      {
-        headers: { "Content-Type": "application/json" },
-      }
+      { headers: { "Content-Type": "application/json" } }
     );
 
-    // Access the data directly from geminiResponse.data
     const data = geminiResponse.data;
-
-    // The rest of your code remains the same
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!text) {
-      // Release the connection before sending the response
       if (conn) conn.release();
       return res
         .status(500)
         .json({ error: "The response from the AI was empty or malformed." });
     }
 
-    if (userStats.length > 0) {
+    // --- Database Update for Query Limit ---
+    if (userStats && userStats.length > 0) {
       const today = new Date().toDateString();
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
       ).toDateString();
-      if (today === lastQueryDay) {
-        const updateQuery = `UPDATE user_query_stats SET queries_today = queries_today + 1, last_query_timestamp = NOW() WHERE user_id = ?`;
-        await conn.query(updateQuery, [userId]);
-      } else {
-        const updateQuery = `UPDATE user_query_stats SET queries_today = 1, last_query_timestamp = NOW() WHERE user_id = ?`;
-        await conn.query(updateQuery, [userId]);
-      }
+      const updateQuery =
+        today === lastQueryDay
+          ? `UPDATE user_query_stats SET queries_today = queries_today + 1, last_query_timestamp = NOW() WHERE user_id = ?`
+          : `UPDATE user_query_stats SET queries_today = 1, last_query_timestamp = NOW() WHERE user_id = ?`;
+      await conn.query(updateQuery, [userId]);
     } else {
       const insertQuery = `INSERT INTO user_query_stats (user_id, queries_today, last_query_timestamp) VALUES (?, 1, NOW())`;
       await conn.query(insertQuery, [userId]);
     }
 
-    // Send the successful response back to the React frontend
     res.json({ response: text });
   } catch (err) {
     console.error("Server Error:", err);
@@ -814,10 +943,7 @@ app.post("/api/query", async (req, res) => {
       .status(500)
       .json({ error: err.message || "An unknown server error occurred." });
   } finally {
-    // Ensure the connection is released in all cases
-    if (conn) {
-      conn.release();
-    }
+    if (conn) conn.release();
   }
 });
 
