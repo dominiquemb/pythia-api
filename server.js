@@ -305,24 +305,29 @@ async function recalculateAllChartsOnStartup() {
           data = event.event_data;
         }
 
-        // ✅ CORRECTED: Add fallback logic to handle old chart data
         let inputs;
         if (data.meta && data.meta.inputs) {
-          // Use the new format if it exists
           inputs = data.meta.inputs;
         } else if (data.meta && data.meta.date && data.meta.location) {
-          // Fallback for old data: reconstruct inputs from existing meta fields
           console.log(
             `Event ID ${eventId} is old format, reconstructing inputs...`
           );
-          const utcDate = DateTime.fromISO(data.meta.date, { zone: "utc" });
-          inputs = {
-            year: utcDate.year,
-            month: utcDate.month,
-            day: utcDate.day,
-            time: utcDate.toFormat("HH:mm:ss"),
-            location: data.meta.location,
-          };
+
+          const dateString = data.meta.date.replace(" UTC", "");
+          const utcDate = DateTime.fromSQL(dateString, { zone: "utc" });
+
+          if (utcDate.isValid) {
+            inputs = {
+              year: utcDate.year,
+              month: utcDate.month,
+              day: utcDate.day,
+              time: utcDate.toFormat("HH:mm:ss"),
+              location: data.meta.location,
+            };
+
+            // ✅ ADD THIS LOGGING to verify the reconstructed inputs
+            console.log(`---> Reconstructed for Event ${eventId}:`, inputs);
+          }
         }
 
         if (
@@ -334,7 +339,7 @@ async function recalculateAllChartsOnStartup() {
           !inputs.location
         ) {
           console.warn(
-            `Skipping event ID ${eventId}: Missing input data even after fallback.`
+            `Skipping event ID ${eventId}: Missing or invalid input data even after fallback.`
           );
           continue;
         }
