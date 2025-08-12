@@ -586,21 +586,21 @@ app.get("/api/events/:userId", async (req, res) => {
     });
   }
 
-  const verified = await supabase.auth.getUser(authorization);
-  if (!verified?.data?.user) {
-    return res.status(400).json({
-      response: "Invalid JWT token",
-    });
-  }
-
-  // Security check: ensure the requesting user is the one they're asking for data about
-  if (verified.data.user.id !== userId) {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden: You can only request your own data.",
-    });
-  }
   try {
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({
+        response: "Invalid JWT token",
+      });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only request your own data.",
+      });
+    }
+
     if (!userId) {
       return res
         .status(400)
@@ -612,8 +612,6 @@ app.get("/api/events/:userId", async (req, res) => {
       "SELECT * FROM astro_event_data WHERE user_id = ? ORDER BY created_at DESC";
     const rows = await conn.query(query, [userId]);
 
-    // The 'event_data' column might be a string or an object.
-    // This handles both cases to prevent parsing errors.
     const events = rows.map((row) => {
       let parsedData;
       if (typeof row.event_data === "string") {
@@ -629,7 +627,6 @@ app.get("/api/events/:userId", async (req, res) => {
           };
         }
       } else {
-        // If it's not a string, assume it's already a valid object
         parsedData = row.event_data;
       }
 
@@ -638,6 +635,13 @@ app.get("/api/events/:userId", async (req, res) => {
         event_data: parsedData,
       };
     });
+
+    // ✅ ADDED: Human-readable log for each event being sent to the client.
+    console.log(`\n--- Sending ${events.length} Event(s) to Client ---`);
+    events.forEach((event) => {
+      logChartSummary(event.event_data, `Chart for "${event.label}"`);
+    });
+    console.log(`-------------------------------------\n`);
 
     res.json(events);
   } catch (err) {
