@@ -438,6 +438,10 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
   const { eventId } = req.params;
   const updatedFields = req.body;
 
+  console.log(`--- Received Update for Event ID ${eventId} ---`);
+  console.log(req.body);
+  console.log("------------------------------------------");
+
   let conn;
   if (!authorization) {
     return res.status(400).json({
