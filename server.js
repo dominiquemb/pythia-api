@@ -806,7 +806,6 @@ app.post("/api/query", async (req, res) => {
     let finalChartDataString = chartData;
     let additionalContext = "";
 
-    // --- Handle Progressed Charts ---
     if (
       progressed === true &&
       Array.isArray(progressedEventIds) &&
@@ -815,7 +814,6 @@ app.post("/api/query", async (req, res) => {
       try {
         let charts = JSON.parse(chartData);
         if (!Array.isArray(charts)) charts = [charts];
-
         const updatedCharts = await Promise.all(
           charts.map(async (chart) => {
             if (progressedEventIds.includes(chart.event_id)) {
@@ -830,13 +828,14 @@ app.post("/api/query", async (req, res) => {
                 ).years;
                 const progressedDate = birthDate.plus({ days: ageInYears });
 
-                // ✅ CORRECTED: Use the correct cityTimezones variable and method
                 let locationForCalc = natalLocation;
                 if (customTimezone) {
-                  const cityDataArray =
-                    cityTimezones.findFromTz(customTimezone);
-                  if (cityDataArray && cityDataArray.length > 0) {
-                    locationForCalc = `${cityDataArray[0].city}, ${cityDataArray[0].country}`;
+                  // ✅ CORRECTED: Use the standard .find() method
+                  const cityData = cityTimezones.find(
+                    (c) => c.timezone === customTimezone
+                  );
+                  if (cityData) {
+                    locationForCalc = `${cityData.city}, ${cityData.country}`;
                   }
                 }
 
@@ -846,7 +845,7 @@ app.post("/api/query", async (req, res) => {
                   progressedDate.day,
                   progressedDate.toFormat("HH:mm:ss"),
                   locationForCalc,
-                  false, // includeHouses = false
+                  false,
                   houseSystem
                 );
                 logChartSummary(
@@ -871,11 +870,14 @@ app.post("/api/query", async (req, res) => {
           setZone: true,
         });
         if (transitDate.isValid) {
-          const cityData = cityTimezones.findFromTz(transitDate.zoneName);
-          const transitLocation =
-            cityData && cityData.length > 0
-              ? `${cityData[0].city}, ${cityData[0].country}`
-              : "Greenwich, UK";
+          // ✅ CORRECTED: Use the standard .find() method
+          const cityData = cityTimezones.find(
+            (c) => c.timezone === transitDate.zoneName
+          );
+          const transitLocation = cityData
+            ? `${cityData.city}, ${cityData.country}`
+            : "Greenwich, UK";
+
           const transitChart = await calculateChart(
             transitDate.year,
             transitDate.month,
@@ -899,8 +901,6 @@ app.post("/api/query", async (req, res) => {
     }
 
     conn = await pool.getConnection();
-
-    // ✅ FIX 3: Define the checkQuery variable before it is used.
     const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
     const [userStats] = await conn.query(checkQuery, [userId]);
 
@@ -918,7 +918,8 @@ app.post("/api/query", async (req, res) => {
     }
 
     const prompt = `
-      You are an expert astrologer with deep knowledge...
+      You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
+      Analyze the following astrological data and answer the user's question based on it. Provide a thoughtful, detailed, and insightful interpretation without unnecessary flattery.
       **Astrological Data:**
       ---
       ${finalChartDataString}
