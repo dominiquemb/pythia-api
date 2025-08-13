@@ -820,7 +820,6 @@ app.post("/api/query", async (req, res) => {
               const birthDate = DateTime.fromISO(chart.event_data.meta.date);
               const natalLocation = chart.event_data.meta.location;
               const customTimezone = progressedTimezones[chart.event_id];
-
               if (birthDate.isValid && natalLocation) {
                 const ageInYears = DateTime.now().diff(
                   birthDate,
@@ -830,8 +829,8 @@ app.post("/api/query", async (req, res) => {
 
                 let locationForCalc = natalLocation;
                 if (customTimezone) {
-                  // ✅ CORRECTED: Use the standard .find() method
-                  const cityData = cityTimezones.find(
+                  // ✅ CORRECTED: Use cityTimezones.cityMapping.find()
+                  const cityData = cityTimezones.cityMapping.find(
                     (c) => c.timezone === customTimezone
                   );
                   if (cityData) {
@@ -870,8 +869,8 @@ app.post("/api/query", async (req, res) => {
           setZone: true,
         });
         if (transitDate.isValid) {
-          // ✅ CORRECTED: Use the standard .find() method
-          const cityData = cityTimezones.find(
+          // ✅ CORRECTED: Use cityTimezones.cityMapping.find()
+          const cityData = cityTimezones.cityMapping.find(
             (c) => c.timezone === transitDate.zoneName
           );
           const transitLocation = cityData
@@ -903,14 +902,13 @@ app.post("/api/query", async (req, res) => {
     conn = await pool.getConnection();
     const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
     const queryResult = await conn.query(checkQuery, [userId]);
-
     const userStats = queryResult
       ? Array.isArray(queryResult)
         ? queryResult
         : [queryResult]
       : [];
 
-    if (userStats && userStats.length > 0) {
+    if (userStats.length > 0) {
       const today = new Date().toDateString();
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
@@ -955,7 +953,7 @@ app.post("/api/query", async (req, res) => {
         .json({ error: "The response from the AI was empty or malformed." });
     }
 
-    if (userStats && userStats.length > 0) {
+    if (userStats.length > 0) {
       const today = new Date().toDateString();
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
@@ -980,7 +978,6 @@ app.post("/api/query", async (req, res) => {
     if (conn) conn.release();
   }
 });
-
 // 6. Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
