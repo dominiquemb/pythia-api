@@ -473,10 +473,19 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    const [rows] = await conn.query(
-      "SELECT event_data, label FROM astro_event_data WHERE event_id = ?",
-      [eventId]
+    // ✅ CORRECTED: Use the same robust query and normalization logic
+    const queryResult = await conn.query(
+      "SELECT event_data, label FROM astro_event_data WHERE user_id = ? AND event_id = ?",
+      [updatedFields.userId, eventId]
     );
+
+    // Normalize the result to always be an array to handle MariaDB's behavior
+    const rows = queryResult
+      ? Array.isArray(queryResult)
+        ? queryResult
+        : [queryResult]
+      : [];
+
     if (rows.length === 0) {
       return res
         .status(404)
