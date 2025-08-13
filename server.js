@@ -756,7 +756,6 @@ app.post("/api/natal-chart", async (req, res) => {
 
 app.post("/api/query", async (req, res) => {
   const { authorization } = req.headers;
-  // ✅ ADDED: Destructure all the new possible parameters
   const {
     userId,
     chartData,
@@ -777,24 +776,20 @@ app.post("/api/query", async (req, res) => {
     });
   }
 
-  // ✅ CORRECTED: Typo in 'authorization' variable
-  const verified = await supabase.auth.getUser(authorization);
-  if (!verified?.data?.user) {
-    return res.status(400).json({
-      response: "Invalid JWT token",
-    });
-  }
-
-  if (verified.data.user.id !== userId) {
-    return res.status(403).json({
-      success: false,
-      message: "Forbidden: You can only request your own data.",
-    });
-  }
-
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ response: "Invalid JWT token" });
+    }
 
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only request your own data.",
+      });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
     console.log(`User ${userId} made a query: ${userQuestion}`);
 
     if (!apiKey) {
@@ -808,10 +803,10 @@ app.post("/api/query", async (req, res) => {
       });
     }
 
-    // --- ✅ MODIFIED: Dynamic Chart Calculation & Logging ---
     let finalChartDataString = chartData;
     let additionalContext = "";
 
+    // --- Handle Progressed Charts ---
     if (
       progressed === true &&
       Array.isArray(progressedEventIds) &&
@@ -824,8 +819,8 @@ app.post("/api/query", async (req, res) => {
         const updatedCharts = await Promise.all(
           charts.map(async (chart) => {
             if (progressedEventIds.includes(chart.event_id)) {
-              const birthDate = DateTime.fromISO(chart.meta.date);
-              const natalLocation = chart.meta.location;
+              const birthDate = DateTime.fromISO(chart.event_data.meta.date);
+              const natalLocation = chart.event_data.meta.location;
               const customTimezone = progressedTimezones[chart.event_id];
 
               if (birthDate.isValid && natalLocation) {
@@ -835,10 +830,15 @@ app.post("/api/query", async (req, res) => {
                 ).years;
                 const progressedDate = birthDate.plus({ days: ageInYears });
 
-                const locationForCalc = customTimezone
-                  ? cities.find((c) => c.timezone === customTimezone)?.name ||
-                    natalLocation
-                  : natalLocation;
+                // ✅ CORRECTED: Use the correct cityTimezones variable and method
+                let locationForCalc = natalLocation;
+                if (customTimezone) {
+                  const cityDataArray =
+                    cityTimezones.findFromTz(customTimezone);
+                  if (cityDataArray && cityDataArray.length > 0) {
+                    locationForCalc = `${cityDataArray[0].city}, ${cityDataArray[0].country}`;
+                  }
+                }
 
                 const progressedChartData = await calculateChart(
                   progressedDate.year,
@@ -846,10 +846,9 @@ app.post("/api/query", async (req, res) => {
                   progressedDate.day,
                   progressedDate.toFormat("HH:mm:ss"),
                   locationForCalc,
-                  false,
+                  false, // includeHouses = false
                   houseSystem
                 );
-
                 logChartSummary(
                   progressedChartData,
                   `Progressed Chart for Event ID ${chart.event_id}`
@@ -872,13 +871,11 @@ app.post("/api/query", async (req, res) => {
           setZone: true,
         });
         if (transitDate.isValid) {
-          const cityData = cities.find(
-            (c) => c.timezone === transitDate.zoneName
-          );
-          const transitLocation = cityData
-            ? `${cityData.city}, ${cityData.country}`
-            : "Greenwich, UK";
-
+          const cityData = cityTimezones.findFromTz(transitDate.zoneName);
+          const transitLocation =
+            cityData && cityData.length > 0
+              ? `${cityData[0].city}, ${cityData[0].country}`
+              : "Greenwich, UK";
           const transitChart = await calculateChart(
             transitDate.year,
             transitDate.month,
@@ -888,25 +885,23 @@ app.post("/api/query", async (req, res) => {
             false,
             houseSystem
           );
-
           logChartSummary(
             transitChart,
             `Transit Chart for ${transitDate.toFormat("yyyy-MM-dd")}`
           );
-
           additionalContext = `\n\n**Transit Chart for ${transitDate.toFormat(
             "yyyy-MM-dd HH:mm"
-          )}:**\n---
-${JSON.stringify(transitChart, null, 2)}
----`;
+          )}:**\n---\n${JSON.stringify(transitChart, null, 2)}\n---`;
         }
       } catch (e) {
         console.error("Error processing transit chart:", e.message);
       }
     }
 
-    // --- Database Logic for Query Limit ---
     conn = await pool.getConnection();
+
+    // ✅ FIX 3: Define the checkQuery variable before it is used.
+    const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
     const [userStats] = await conn.query(checkQuery, [userId]);
 
     if (userStats && userStats.length > 0) {
@@ -922,11 +917,8 @@ ${JSON.stringify(transitChart, null, 2)}
       }
     }
 
-    // --- Gemini API Call ---
     const prompt = `
-      You are an expert astrologer with deep knowledge of various astrological techniques...
-      Analyze the following astrological data and answer the user's question...
-
+      You are an expert astrologer with deep knowledge...
       **Astrological Data:**
       ---
       ${finalChartDataString}
@@ -934,7 +926,6 @@ ${JSON.stringify(transitChart, null, 2)}
       ${additionalContext}
       **User's Question:**
       ${userQuestion}
-
       **Your Interpretation:**
     `;
 
@@ -957,7 +948,6 @@ ${JSON.stringify(transitChart, null, 2)}
         .json({ error: "The response from the AI was empty or malformed." });
     }
 
-    // --- Database Update for Query Limit ---
     if (userStats && userStats.length > 0) {
       const today = new Date().toDateString();
       const lastQueryDay = new Date(
