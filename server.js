@@ -433,14 +433,11 @@ async function recalculateAllChartsOnStartup() {
     if (conn) conn.release();
   }
 }
+
 app.put("/api/astro-event/:eventId", async (req, res) => {
   const { authorization } = req.headers;
   const { eventId } = req.params;
   const updatedFields = req.body;
-
-  console.log(`--- Received Update for Event ID ${eventId} ---`);
-  console.log(req.body);
-  console.log("------------------------------------------");
 
   let conn;
   if (!authorization) {
@@ -458,7 +455,6 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
       });
     }
 
-    // ✅ CORRECTED: Security check now correctly gets the userId from the request body.
     if (verified.data.user.id !== updatedFields.userId) {
       return res.status(403).json({
         success: false,
@@ -473,13 +469,12 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     }
 
     conn = await pool.getConnection();
-    // ✅ CORRECTED: Use the same robust query and normalization logic
+
     const queryResult = await conn.query(
       "SELECT event_data, label FROM astro_event_data WHERE user_id = ? AND event_id = ?",
       [updatedFields.userId, eventId]
     );
 
-    // Normalize the result to always be an array to handle MariaDB's behavior
     const rows = queryResult
       ? Array.isArray(queryResult)
         ? queryResult
@@ -489,16 +484,23 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     if (rows.length === 0) {
       return res
         .status(404)
-        .json({ error: `Event with ID ${eventId} not found.` });
+        .json({ error: `Event with ID ${eventId} not found for this user.` });
     }
 
-    const existingData = JSON.parse(rows[0].event_data);
-    const existingLabel = rows[0].label;
+    const existingEvent = rows[0];
+
+    // ✅ CORRECTED: Check if event_data is a string before attempting to parse it.
+    const existingData =
+      typeof existingEvent.event_data === "string"
+        ? JSON.parse(existingEvent.event_data)
+        : existingEvent.event_data;
+
+    const existingLabel = existingEvent.label;
 
     const newInputs = { ...existingData.meta.inputs, ...updatedFields };
     const newLabel = updatedFields.label || existingLabel;
 
-    const { year, month, day, time, location } = newInputs;
+    const { year, month, day, time, location, houseSystem } = newInputs;
     if (!year || !month || !day || !time || !location) {
       return res.status(400).json({
         error: "Update would result in missing date, time, or location.",
@@ -509,7 +511,8 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
       month,
       day,
       time,
-      location
+      location,
+      houseSystem
     );
 
     const updateQuery = `
@@ -524,13 +527,10 @@ app.put("/api/astro-event/:eventId", async (req, res) => {
     ]);
 
     recalculatedChartData.event_id = parseInt(eventId);
-
-    // ✅ ADDED: Human-readable log of the data being sent back to the client.
     logChartSummary(
       recalculatedChartData,
       `Updated Chart Sent for "${newLabel}"`
     );
-
     res.status(200).json(recalculatedChartData);
   } catch (err) {
     console.error(`PUT /api/astro-event Error:`, err.message);
