@@ -902,6 +902,8 @@ app.post("/api/query", async (req, res) => {
 
     conn = await pool.getConnection();
     const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
+    const queryResult = await conn.query(checkQuery, [userId]);
+
     const userStats = queryResult
       ? Array.isArray(queryResult)
         ? queryResult
