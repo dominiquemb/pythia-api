@@ -913,11 +913,11 @@ app.post("/api/query", async (req, res) => {
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
       ).toDateString();
-      if (today === lastQueryDay && userStats[0].queries_today >= 5) {
+      if (today === lastQueryDay && userStats[0].queries_today >= 30) {
         if (conn) conn.release();
         return res
           .status(429)
-          .json({ error: "Query limit of 5 per day reached." });
+          .json({ error: "Query limit of 30 per day reached." });
       }
     }
 
