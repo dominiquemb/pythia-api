@@ -978,7 +978,52 @@ app.post("/api/query", async (req, res) => {
     if (conn) conn.release();
   }
 });
-// 6. Start the server
+
+// 6. Ephemeris endpoint - Get planet positions for any date
+app.post("/api/ephemeris", async (req, res) => {
+  const { authorization } = req.headers;
+  const { userId, year, month, day, time, location, houseSystem = "P" } = req.body;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({
+        error: "Missing JWT token in Authorization header."
+      });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        error: "Forbidden: You can only request your own data.",
+      });
+    }
+
+    // === CALCULATE EPHEMERIS ===
+    const chartData = await calculateChart(
+      year,
+      month,
+      day,
+      time,
+      location,
+      true, // Include houses
+      houseSystem
+    );
+
+    // Return lightweight response (no saving to DB)
+    res.json(chartData);
+
+  } catch (err) {
+    console.error("Ephemeris endpoint error:", err.message);
+    res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
+// 7. Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 
