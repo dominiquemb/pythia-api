@@ -15,10 +15,12 @@ const supabase = createClient(supabaseUrl, process.env.SUPABASE_SECRET_KEY);
 // 2. Initialize the Express app
 const app = express();
 const PORT = process.env.PORT || 3002; // Use a port from .env or default to 3002
+const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
 
 // 3. Middleware setup
 app.use(cors()); // Enable Cross-Origin Resource Sharing for your React app
-app.use(express.json()); // Enable the server to parse JSON request bodies
+app.use(express.json({ limit: REQUEST_BODY_LIMIT })); // Parse larger JSON payloads for chart/chat requests
+app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 
 // 4. MariaDB Connection Pool
 // Use the connection details provided to connect to your database.
@@ -1805,6 +1807,16 @@ app.post("/api/chat/save-encrypted", async (req, res) => {
   } finally {
     if (conn) conn.release();
   }
+});
+
+// Global body-size error handler (registered after route middleware).
+app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      error: `Payload too large. Max request size is ${REQUEST_BODY_LIMIT}.`,
+    });
+  }
+  return next(err);
 });
 
 // 9. Start the server
