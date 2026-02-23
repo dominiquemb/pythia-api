@@ -1307,6 +1307,8 @@ Assistant: ${assistantText}`;
       ? `Context (recent chat history):\n${combinedConversationHistory}\n\nUser message:\n${userMessage}`
       : userMessage;
 
+    console.log("[chat] finalUserMessage:", finalUserMessage);
+
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
       ? `
