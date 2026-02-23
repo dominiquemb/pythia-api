@@ -7,6 +7,7 @@ This runbook applies the database changes required for:
 ## Files
 - `scripts/004_encryption_keys_table.sql`
 - `scripts/005_add_encryption_columns.sql`
+- `scripts/008_expand_encrypted_columns.sql`
 - `scripts/006_conversations_schema.sql`
 - `scripts/007_normalize_legacy_chat_conversations.js`
 
@@ -16,6 +17,7 @@ Run in this exact order:
 ```bash
 mysql -u <db_user> -p <db_name> < scripts/004_encryption_keys_table.sql
 mysql -u <db_user> -p <db_name> < scripts/005_add_encryption_columns.sql
+mysql -u <db_user> -p <db_name> < scripts/008_expand_encrypted_columns.sql
 mysql -u <db_user> -p <db_name> < scripts/006_conversations_schema.sql
 ```
 
@@ -45,6 +47,11 @@ Adds encrypted message support to `chat_messages`:
 - `encryption_iv_user`
 - `encryption_iv_assistant`
 - `is_encrypted`
+
+### `008_expand_encrypted_columns.sql`
+Expands encrypted message columns to handle large payloads:
+- `user_message_encrypted` (to `MEDIUMTEXT`)
+- `assistant_response_encrypted` (to `MEDIUMTEXT`)
 
 ### `006_conversations_schema.sql`
 Moves chats to conversation-first model:
