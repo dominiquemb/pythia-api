@@ -1023,7 +1023,512 @@ app.post("/api/ephemeris", async (req, res) => {
   }
 });
 
-// 7. Start the server
+// 7. Chat endpoints
+
+// POST /api/chat - Submit a chat message and get AI response
+app.post("/api/chat", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const {
+    userId,
+    sessionKey,
+    userMessage,
+    chartData,
+    saveToHistory = true,
+    transitTimestamp,
+    progressed,
+    progressedEventIds,
+    progressedTimezones,
+    houseSystem = "P",
+  } = req.body;
+
+  try {
+    // === 1. AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({
+        error: "Missing JWT token in Authorization header."
+      });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        error: "Forbidden: You can only request your own data."
+      });
+    }
+
+    // === 2. VALIDATION ===
+    if (!userMessage || !userMessage.trim()) {
+      return res.status(400).json({ error: "userMessage is required" });
+    }
+
+    if (!sessionKey) {
+      return res.status(400).json({ error: "sessionKey is required" });
+    }
+
+    // === 3. RATE LIMITING (existing pattern from /api/query) ===
+    conn = await pool.getConnection();
+
+    const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
+    const userStats = await conn.query(checkQuery, [userId]);
+
+    if (userStats.length > 0) {
+      const lastQueryTimestamp = userStats[0].last_query_timestamp;
+      const lastQueryDay = new Date(lastQueryTimestamp).toDateString();
+      const today = new Date().toDateString();
+
+      if (today === lastQueryDay && userStats[0].queries_today >= 5) {
+        conn.release();
+        return res.status(429).json({
+          error: "Query limit of 5 per day reached. Please try again tomorrow."
+        });
+      }
+    }
+
+    // === 4. PARSE CHART DATA ===
+    let parsedChartData = [];
+    let eventIdsUsed = [];
+
+    if (chartData) {
+      try {
+        parsedChartData = typeof chartData === "string"
+          ? JSON.parse(chartData)
+          : chartData;
+        eventIdsUsed = parsedChartData.map(event => event.event_id);
+      } catch (err) {
+        conn.release();
+        return res.status(400).json({ error: "Invalid chartData JSON" });
+      }
+    }
+
+    // === 5. BUILD ASTROLOGICAL CONTEXT ===
+    let finalChartDataString = "";
+    let chartContext = "";
+
+    if (parsedChartData.length > 0) {
+      for (const event of parsedChartData) {
+        chartContext += `\n\n--- ${event.label} ---\n`;
+        chartContext += JSON.stringify(event.event_data, null, 2);
+      }
+      finalChartDataString = JSON.stringify(parsedChartData, null, 2);
+    } else {
+      chartContext = "\n\nNo specific birth charts provided. This is a general astrology question.\n";
+    }
+
+    // Handle progressed charts if requested
+    let progressedContext = "";
+    if (progressed && progressedEventIds?.length > 0) {
+      try {
+        let charts = parsedChartData;
+        if (!Array.isArray(charts)) charts = [charts];
+        const updatedCharts = await Promise.all(
+          charts.map(async (chart) => {
+            if (progressedEventIds.includes(chart.event_id)) {
+              const birthDate = DateTime.fromISO(chart.event_data.meta.date);
+              const natalLocation = chart.event_data.meta.location;
+              const customTimezone = progressedTimezones[chart.event_id];
+              if (birthDate.isValid && natalLocation) {
+                const ageInYears = DateTime.now().diff(birthDate, "years").years;
+                const progressedDate = birthDate.plus({ days: ageInYears });
+
+                let locationForCalc = natalLocation;
+                if (customTimezone) {
+                  const cityData = cityTimezones.cityMapping.find(
+                    (c) => c.timezone === customTimezone
+                  );
+                  if (cityData) {
+                    locationForCalc = `${cityData.city}, ${cityData.country}`;
+                  }
+                }
+
+                const progressedChartData = await calculateChart(
+                  progressedDate.year,
+                  progressedDate.month,
+                  progressedDate.day,
+                  progressedDate.toFormat("HH:mm:ss"),
+                  locationForCalc,
+                  false,
+                  houseSystem
+                );
+                chart.progressedChart = progressedChartData;
+              }
+            }
+            return chart;
+          })
+        );
+        finalChartDataString = JSON.stringify(updatedCharts, null, 2);
+      } catch (e) {
+        console.error("Error processing progressed charts:", e.message);
+      }
+    }
+
+    // Handle transits if requested
+    let transitContext = "";
+    if (transitTimestamp) {
+      try {
+        const transitDate = DateTime.fromISO(transitTimestamp, {
+          setZone: true,
+        });
+        if (transitDate.isValid) {
+          const cityData = cityTimezones.cityMapping.find(
+            (c) => c.timezone === transitDate.zoneName
+          );
+          const transitLocation = cityData
+            ? `${cityData.city}, ${cityData.country}`
+            : "Greenwich, UK";
+
+          const transitChart = await calculateChart(
+            transitDate.year,
+            transitDate.month,
+            transitDate.day,
+            transitDate.toFormat("HH:mm:ss"),
+            transitLocation,
+            false,
+            houseSystem
+          );
+          transitContext = `\n\n**Transit Chart for ${transitDate.toFormat(
+            "yyyy-MM-dd HH:mm"
+          )}:**\n---\n${JSON.stringify(transitChart, null, 2)}\n---`;
+        }
+      } catch (e) {
+        console.error("Error processing transit chart:", e.message);
+      }
+    }
+
+    // === 6. CALL GEMINI API ===
+    const systemPrompt = parsedChartData.length > 0
+      ? `You are Pythia, an expert astrologer. Answer the user's question based on the following astrological data:
+
+${chartContext}
+${progressedContext}
+${transitContext}
+
+User Question: ${userMessage}
+
+Provide a detailed, insightful astrological interpretation.`
+      : `You are Pythia, an expert astrologer. Answer the user's general astrology question:
+
+${userMessage}
+
+Provide a detailed, insightful astrological interpretation. Since no specific birth charts are provided, give general astrological wisdom and insights.`;
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+    const geminiResponse = await axios.post(apiUrl, {
+      contents: [
+        {
+          parts: [{ text: systemPrompt }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 8000,
+      },
+    });
+
+    const text = geminiResponse?.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!text) {
+      throw new Error("No response from Gemini API");
+    }
+
+    // === 7. SAVE TO DATABASE (if requested) ===
+    let messageId = null;
+    if (saveToHistory) {
+      const insertQuery = `
+        INSERT INTO chat_messages
+        (user_id, session_key, user_message, assistant_response, event_ids_used, query_metadata, is_saved)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const metadata = {
+        transitTimestamp,
+        progressed,
+        progressedEventIds,
+        progressedTimezones,
+        houseSystem
+      };
+
+      const insertResult = await conn.query(insertQuery, [
+        userId,
+        sessionKey,
+        userMessage,
+        text,
+        JSON.stringify(eventIdsUsed),
+        JSON.stringify(metadata),
+        true
+      ]);
+
+      messageId = insertResult.insertId;
+    }
+
+    // === 8. UPDATE RATE LIMIT STATS ===
+    const lastQueryDay = userStats.length > 0
+      ? new Date(userStats[0].last_query_timestamp).toDateString()
+      : null;
+    const today = new Date().toDateString();
+
+    if (lastQueryDay === today) {
+      await conn.query(
+        `UPDATE user_query_stats SET queries_today = queries_today + 1, last_query_timestamp = NOW() WHERE user_id = ?`,
+        [userId]
+      );
+    } else {
+      await conn.query(
+        `INSERT INTO user_query_stats (user_id, queries_today, last_query_timestamp) VALUES (?, 1, NOW())
+         ON DUPLICATE KEY UPDATE queries_today = 1, last_query_timestamp = NOW()`,
+        [userId]
+      );
+    }
+
+    // === 9. RETURN RESPONSE ===
+    res.json({
+      response: text,
+      messageId: messageId,
+      saved: saveToHistory
+    });
+
+  } catch (err) {
+    console.error("Chat endpoint error:", err.message);
+    res.status(500).json({ error: err.message || "Internal server error" });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET /api/chat/:userId/:sessionKey - Retrieve all messages for a specific chat session
+app.get("/api/chat/:userId/:sessionKey", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const { userId, sessionKey } = req.params;
+  const limit = parseInt(req.query.limit) || 50;
+  const offset = parseInt(req.query.offset) || 0;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({
+        error: "Forbidden: You can only access your own chat history."
+      });
+    }
+
+    // === FETCH MESSAGES ===
+    conn = await pool.getConnection();
+
+    const messagesQuery = `
+      SELECT
+        message_id as messageId,
+        user_message as userMessage,
+        assistant_response as assistantResponse,
+        event_ids_used as eventIdsUsed,
+        created_at as createdAt
+      FROM chat_messages
+      WHERE user_id = ? AND session_key = ? AND is_saved = TRUE
+      ORDER BY created_at ASC
+      LIMIT ? OFFSET ?
+    `;
+
+    const messages = await conn.query(messagesQuery, [userId, sessionKey, limit, offset]);
+
+    // Parse JSON fields
+    const formattedMessages = messages.map(msg => ({
+      ...msg,
+      eventIdsUsed: JSON.parse(msg.eventIdsUsed)
+    }));
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM chat_messages
+      WHERE user_id = ? AND session_key = ? AND is_saved = TRUE
+    `;
+    const countResult = await conn.query(countQuery, [userId, sessionKey]);
+    const total = countResult[0]?.total || 0;
+
+    res.json({
+      messages: formattedMessages,
+      total: total
+    });
+
+  } catch (err) {
+    console.error("Get chat history error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET /api/chat-sessions/:userId - List all unique chat sessions for a user
+app.get("/api/chat-sessions/:userId", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const { userId } = req.params;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // === FETCH SESSIONS ===
+    conn = await pool.getConnection();
+
+    const sessionsQuery = `
+      SELECT
+        session_key as sessionKey,
+        event_ids_used as eventIds,
+        COUNT(*) as messageCount,
+        MAX(created_at) as lastMessageAt
+      FROM chat_messages
+      WHERE user_id = ? AND is_saved = TRUE
+      GROUP BY session_key
+      ORDER BY lastMessageAt DESC
+    `;
+
+    const sessions = await conn.query(sessionsQuery, [userId]);
+
+    // Parse event IDs and format
+    const formattedSessions = sessions.map(session => {
+      const eventIds = JSON.parse(session.eventIds);
+
+      return {
+        sessionKey: session.sessionKey,
+        eventIds: eventIds,
+        messageCount: session.messageCount,
+        lastMessageAt: session.lastMessageAt
+      };
+    });
+
+    res.json({ sessions: formattedSessions });
+
+  } catch (err) {
+    console.error("Get sessions error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// DELETE /api/chat/:messageId - Delete a single message from chat history
+app.delete("/api/chat/:messageId", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const { messageId } = req.params;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    const userId = verified.data.user.id;
+
+    // === DELETE MESSAGE ===
+    conn = await pool.getConnection();
+
+    // First verify the message belongs to this user
+    const checkQuery = `SELECT user_id FROM chat_messages WHERE message_id = ?`;
+    const checkResult = await conn.query(checkQuery, [messageId]);
+
+    if (checkResult.length === 0) {
+      conn.release();
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    if (checkResult[0].user_id !== userId) {
+      conn.release();
+      return res.status(403).json({ error: "Forbidden: Not your message" });
+    }
+
+    // Delete the message
+    const deleteQuery = `DELETE FROM chat_messages WHERE message_id = ?`;
+    await conn.query(deleteQuery, [messageId]);
+
+    res.json({
+      success: true,
+      message: "Message deleted successfully"
+    });
+
+  } catch (err) {
+    console.error("Delete message error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// DELETE /api/chat-session/:userId/:sessionKey - Clear entire chat session
+app.delete("/api/chat-session/:userId/:sessionKey", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const { userId, sessionKey } = req.params;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // === DELETE SESSION ===
+    conn = await pool.getConnection();
+
+    const deleteQuery = `
+      DELETE FROM chat_messages
+      WHERE user_id = ? AND session_key = ?
+    `;
+    const result = await conn.query(deleteQuery, [userId, sessionKey]);
+
+    res.json({
+      success: true,
+      deletedCount: result.affectedRows,
+      message: "Chat session cleared successfully"
+    });
+
+  } catch (err) {
+    console.error("Delete session error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// 8. Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 
