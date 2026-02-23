@@ -1085,6 +1085,7 @@ app.post("/api/chat", async (req, res) => {
     userId,
     conversationId,
     userMessage,
+    finalUserMessage,
     chartData,
     chatHistoryContext,
     saveToHistory = true,
@@ -1259,55 +1260,12 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // Build conversation history context from stored plaintext rows.
-    let dbConversationHistory = "";
-    if (targetConversationId) {
-      const priorMessages = await conn.query(
-        `SELECT user_message as userMessage, assistant_response as assistantResponse, is_encrypted as isEncrypted
-         FROM chat_messages
-         WHERE user_id = ? AND conversation_id = ? AND is_saved = TRUE
-         ORDER BY created_at DESC, message_id DESC
-         LIMIT 12`,
-        [userId, targetConversationId]
-      );
-
-      dbConversationHistory = priorMessages
-        .reverse()
-        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse)
-        .map((msg, idx) => {
-          return `Turn ${idx + 1}
-User: ${msg.userMessage}
-Assistant: ${msg.assistantResponse}`;
-        })
-        .join("\n\n");
-    }
-
-    // Frontend can send recent local context (important for encrypted chats).
-    const providedConversationHistory = Array.isArray(chatHistoryContext)
-      ? chatHistoryContext
-          .slice(-12)
-          .map((entry, idx) => {
-            if (!entry || typeof entry !== "object") return null;
-            const userText = entry.userMessage || entry.user || "";
-            const assistantText = entry.assistantResponse || entry.assistant || "";
-            if (!userText || !assistantText) return null;
-            return `Turn ${idx + 1}
-User: ${userText}
-Assistant: ${assistantText}`;
-          })
-          .filter(Boolean)
-          .join("\n\n")
-      : "";
-
-    const combinedConversationHistory = [dbConversationHistory, providedConversationHistory]
-      .filter(Boolean)
-      .join("\n\n");
-
-    const finalUserMessage = combinedConversationHistory
-      ? `Context (recent chat history):\n${combinedConversationHistory}\n\nUser message:\n${userMessage}`
-      : userMessage;
-
-    console.log("[chat] finalUserMessage:", finalUserMessage);
+    // Frontend is responsible for building contextual user message payload
+    // (critical for encrypted chats where server cannot decrypt DB history).
+    const modelUserMessage =
+      typeof finalUserMessage === "string" && finalUserMessage.trim()
+        ? finalUserMessage
+        : userMessage;
 
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
@@ -1321,14 +1279,14 @@ Assistant: ${assistantText}`;
       ${progressedContext}
       ${transitContext}
       **User's Question:**
-      ${finalUserMessage}
+      ${modelUserMessage}
       **Your Interpretation:**
     `
       : `
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Answer the user's general astrology question with thoughtful, detailed, and insightful interpretation without unnecessary flattery.
       **User's Question:**
-      ${finalUserMessage}
+      ${modelUserMessage}
       **Your Interpretation:**
     `;
 
