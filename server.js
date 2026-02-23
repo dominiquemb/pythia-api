@@ -1261,6 +1261,7 @@ app.post("/api/chat", async (req, res) => {
 
     // Build conversation history context from stored plaintext rows.
     let dbConversationHistory = "";
+    let dbPlainHistoryTurns = 0;
     if (targetConversationId) {
       const priorMessages = await conn.query(
         `SELECT user_message as userMessage, assistant_response as assistantResponse, is_encrypted as isEncrypted
@@ -1271,19 +1272,21 @@ app.post("/api/chat", async (req, res) => {
         [userId, targetConversationId]
       );
 
-      dbConversationHistory = priorMessages
+      const dbPlainMessages = priorMessages
         .reverse()
-        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse)
-        .map((msg, idx) => {
+        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse);
+
+      dbConversationHistory = dbPlainMessages.map((msg, idx) => {
           return `Turn ${idx + 1}
 User: ${msg.userMessage}
 Assistant: ${msg.assistantResponse}`;
         })
         .join("\n\n");
+      dbPlainHistoryTurns = dbPlainMessages.length;
     }
 
     // Frontend can send recent local context (important for encrypted chats).
-    const providedConversationHistory = Array.isArray(chatHistoryContext)
+    const providedConversationHistoryEntries = Array.isArray(chatHistoryContext)
       ? chatHistoryContext
           .slice(-12)
           .map((entry, idx) => {
@@ -1296,12 +1299,16 @@ User: ${userText}
 Assistant: ${assistantText}`;
           })
           .filter(Boolean)
-          .join("\n\n")
-      : "";
+      : [];
+
+    const providedConversationHistory = providedConversationHistoryEntries.join("\n\n");
 
     const combinedConversationHistory = [dbConversationHistory, providedConversationHistory]
       .filter(Boolean)
       .join("\n\n");
+
+    const historyFromDbTurns = dbPlainHistoryTurns;
+    const historyFromClientTurns = providedConversationHistoryEntries.length;
 
     const conversationContextSection = combinedConversationHistory
       ? `\n**Conversation History (oldest to newest):**\n${combinedConversationHistory}\n`
@@ -1420,7 +1427,15 @@ Assistant: ${assistantText}`;
       response: text,
       messageId: messageId,
       conversationId: targetConversationId,
-      saved: saveToHistory
+      saved: saveToHistory,
+      debugContext: {
+        conversationIdProvided: conversationId || null,
+        conversationIdUsed: targetConversationId || null,
+        historyFromDbTurns,
+        historyFromClientTurns,
+        eventIdsUsedCount: Array.isArray(eventIdsUsed) ? eventIdsUsed.length : 0,
+        chartDataItemsCount: Array.isArray(parsedChartData) ? parsedChartData.length : 0,
+      },
     });
 
   } catch (err) {
