@@ -1086,6 +1086,7 @@ app.post("/api/chat", async (req, res) => {
     conversationId,
     userMessage,
     chartData,
+    chatHistoryContext,
     saveToHistory = true,
     transitTimestamp,
     progressed,
@@ -1151,6 +1152,17 @@ app.post("/api/chat", async (req, res) => {
         if (conn) conn.release();
         return res.status(400).json({ error: "Invalid chartData JSON" });
       }
+    }
+
+    // Resolve conversation early so prior messages can be used as context.
+    let targetConversationId = conversationId || null;
+    if (targetConversationId) {
+      targetConversationId = await resolveConversationId(conn, {
+        userId,
+        conversationId: targetConversationId,
+        userMessage,
+        createIfMissing: false,
+      });
     }
 
     // === 5. BUILD ASTROLOGICAL CONTEXT ===
@@ -1247,6 +1259,54 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
+    // Build conversation history context from stored plaintext rows.
+    let dbConversationHistory = "";
+    if (targetConversationId) {
+      const priorMessages = await conn.query(
+        `SELECT user_message as userMessage, assistant_response as assistantResponse, is_encrypted as isEncrypted
+         FROM chat_messages
+         WHERE user_id = ? AND conversation_id = ? AND is_saved = TRUE
+         ORDER BY created_at DESC, message_id DESC
+         LIMIT 12`,
+        [userId, targetConversationId]
+      );
+
+      dbConversationHistory = priorMessages
+        .reverse()
+        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse)
+        .map((msg, idx) => {
+          return `Turn ${idx + 1}
+User: ${msg.userMessage}
+Assistant: ${msg.assistantResponse}`;
+        })
+        .join("\n\n");
+    }
+
+    // Frontend can send recent local context (important for encrypted chats).
+    const providedConversationHistory = Array.isArray(chatHistoryContext)
+      ? chatHistoryContext
+          .slice(-12)
+          .map((entry, idx) => {
+            if (!entry || typeof entry !== "object") return null;
+            const userText = entry.userMessage || entry.user || "";
+            const assistantText = entry.assistantResponse || entry.assistant || "";
+            if (!userText || !assistantText) return null;
+            return `Turn ${idx + 1}
+User: ${userText}
+Assistant: ${assistantText}`;
+          })
+          .filter(Boolean)
+          .join("\n\n")
+      : "";
+
+    const combinedConversationHistory = [dbConversationHistory, providedConversationHistory]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const conversationContextSection = combinedConversationHistory
+      ? `\n**Conversation History (oldest to newest):**\n${combinedConversationHistory}\n`
+      : "\n**Conversation History:**\nNo prior messages.\n";
+
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
       ? `
@@ -1256,6 +1316,7 @@ app.post("/api/chat", async (req, res) => {
       ---
       ${finalChartDataString}
       ---
+      ${conversationContextSection}
       ${progressedContext}
       ${transitContext}
       **User's Question:**
@@ -1265,6 +1326,7 @@ app.post("/api/chat", async (req, res) => {
       : `
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Answer the user's general astrology question with thoughtful, detailed, and insightful interpretation without unnecessary flattery.
+      ${conversationContextSection}
       **User's Question:**
       ${userMessage}
       **Your Interpretation:**
@@ -1292,7 +1354,6 @@ app.post("/api/chat", async (req, res) => {
 
     // === 7. SAVE TO DATABASE (if requested) ===
     let messageId = null;
-    let targetConversationId = conversationId || null;
     if (saveToHistory || !targetConversationId) {
       targetConversationId = await resolveConversationId(conn, {
         userId,
