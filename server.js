@@ -1247,20 +1247,26 @@ app.post("/api/chat", async (req, res) => {
 
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
-      ? `You are Pythia, an expert astrologer. Answer the user's question based on the following astrological data:
-
-${chartContext}
-${progressedContext}
-${transitContext}
-
-User Question: ${userMessage}
-
-Provide a detailed, insightful astrological interpretation.`
-      : `You are Pythia, an expert astrologer. Answer the user's general astrology question:
-
-${userMessage}
-
-Provide a detailed, insightful astrological interpretation. Since no specific birth charts are provided, give general astrological wisdom and insights.`;
+      ? `
+      You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
+      Analyze the following astrological data and answer the user's question based on it. Provide a thoughtful, detailed, and insightful interpretation without unnecessary flattery.
+      **Astrological Data:**
+      ---
+      ${finalChartDataString}
+      ---
+      ${progressedContext}
+      ${transitContext}
+      **User's Question:**
+      ${userMessage}
+      **Your Interpretation:**
+    `
+      : `
+      You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
+      Answer the user's general astrology question with thoughtful, detailed, and insightful interpretation without unnecessary flattery.
+      **User's Question:**
+      ${userMessage}
+      **Your Interpretation:**
+    `;
 
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
@@ -1285,13 +1291,16 @@ Provide a detailed, insightful astrological interpretation. Since no specific bi
     // === 7. SAVE TO DATABASE (if requested) ===
     let messageId = null;
     let targetConversationId = conversationId || null;
-    if (saveToHistory) {
+    if (saveToHistory || !targetConversationId) {
       targetConversationId = await resolveConversationId(conn, {
         userId,
         conversationId,
         userMessage,
         createIfMissing: true,
       });
+    }
+
+    if (saveToHistory) {
 
       const insertQuery = `
         INSERT INTO chat_messages
@@ -1731,6 +1740,7 @@ app.post("/api/chat/save-encrypted", async (req, res) => {
   const {
     userId,
     conversationId,
+    conversationTitle,
     userMessageEncrypted,
     assistantResponseEncrypted,
     encryptionIVUser,
@@ -1759,7 +1769,7 @@ app.post("/api/chat/save-encrypted", async (req, res) => {
     const targetConversationId = await resolveConversationId(conn, {
       userId,
       conversationId,
-      userMessage: "Encrypted message",
+      userMessage: conversationTitle || "Encrypted message",
       createIfMissing: true,
     });
 
