@@ -1261,7 +1261,6 @@ app.post("/api/chat", async (req, res) => {
 
     // Build conversation history context from stored plaintext rows.
     let dbConversationHistory = "";
-    let dbPlainHistoryTurns = 0;
     if (targetConversationId) {
       const priorMessages = await conn.query(
         `SELECT user_message as userMessage, assistant_response as assistantResponse, is_encrypted as isEncrypted
@@ -1272,21 +1271,19 @@ app.post("/api/chat", async (req, res) => {
         [userId, targetConversationId]
       );
 
-      const dbPlainMessages = priorMessages
+      dbConversationHistory = priorMessages
         .reverse()
-        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse);
-
-      dbConversationHistory = dbPlainMessages.map((msg, idx) => {
+        .filter((msg) => !msg.isEncrypted && msg.userMessage && msg.assistantResponse)
+        .map((msg, idx) => {
           return `Turn ${idx + 1}
 User: ${msg.userMessage}
 Assistant: ${msg.assistantResponse}`;
         })
         .join("\n\n");
-      dbPlainHistoryTurns = dbPlainMessages.length;
     }
 
     // Frontend can send recent local context (important for encrypted chats).
-    const providedConversationHistoryEntries = Array.isArray(chatHistoryContext)
+    const providedConversationHistory = Array.isArray(chatHistoryContext)
       ? chatHistoryContext
           .slice(-12)
           .map((entry, idx) => {
@@ -1299,47 +1296,37 @@ User: ${userText}
 Assistant: ${assistantText}`;
           })
           .filter(Boolean)
-      : [];
-
-    const providedConversationHistory = providedConversationHistoryEntries.join("\n\n");
+          .join("\n\n")
+      : "";
 
     const combinedConversationHistory = [dbConversationHistory, providedConversationHistory]
       .filter(Boolean)
       .join("\n\n");
 
-    const historyFromDbTurns = dbPlainHistoryTurns;
-    const historyFromClientTurns = providedConversationHistoryEntries.length;
-
-    const conversationContextSection = combinedConversationHistory
-      ? `\n**Conversation History (oldest to newest):**\n${combinedConversationHistory}\n`
-      : "\n**Conversation History:**\nNo prior messages.\n";
-    const conversationContextInstruction = "\nUse conversation history as context for continuity with prior turns.";
+    const finalUserMessage = combinedConversationHistory
+      ? `Context (recent chat history):\n${combinedConversationHistory}\n\nUser message:\n${userMessage}`
+      : userMessage;
 
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
       ? `
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Analyze the following astrological data and answer the user's question based on it. Provide a thoughtful, detailed, and insightful interpretation without unnecessary flattery.
-      IMPORTANT: Specific chart data is provided below. Do NOT claim that no chart data was provided.
       **Astrological Data:**
       ---
       ${finalChartDataString}
       ---
-      ${conversationContextSection}
-      ${conversationContextInstruction}
       ${progressedContext}
       ${transitContext}
       **User's Question:**
-      ${userMessage}
+      ${finalUserMessage}
       **Your Interpretation:**
     `
       : `
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Answer the user's general astrology question with thoughtful, detailed, and insightful interpretation without unnecessary flattery.
-      ${conversationContextSection}
-      ${conversationContextInstruction}
       **User's Question:**
-      ${userMessage}
+      ${finalUserMessage}
       **Your Interpretation:**
     `;
 
@@ -1427,15 +1414,7 @@ Assistant: ${assistantText}`;
       response: text,
       messageId: messageId,
       conversationId: targetConversationId,
-      saved: saveToHistory,
-      debugContext: {
-        conversationIdProvided: conversationId || null,
-        conversationIdUsed: targetConversationId || null,
-        historyFromDbTurns,
-        historyFromClientTurns,
-        eventIdsUsedCount: Array.isArray(eventIdsUsed) ? eventIdsUsed.length : 0,
-        chartDataItemsCount: Array.isArray(parsedChartData) ? parsedChartData.length : 0,
-      },
+      saved: saveToHistory
     });
 
   } catch (err) {
