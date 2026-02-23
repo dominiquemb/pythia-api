@@ -1306,6 +1306,7 @@ Assistant: ${assistantText}`;
     const conversationContextSection = combinedConversationHistory
       ? `\n**Conversation History (oldest to newest):**\n${combinedConversationHistory}\n`
       : "\n**Conversation History:**\nNo prior messages.\n";
+    const conversationContextInstruction = "\nUse conversation history as context for continuity with prior turns.";
 
     // === 6. CALL GEMINI API ===
     const systemPrompt = parsedChartData.length > 0
@@ -1318,6 +1319,7 @@ Assistant: ${assistantText}`;
       ${finalChartDataString}
       ---
       ${conversationContextSection}
+      ${conversationContextInstruction}
       ${progressedContext}
       ${transitContext}
       **User's Question:**
@@ -1328,6 +1330,7 @@ Assistant: ${assistantText}`;
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Answer the user's general astrology question with thoughtful, detailed, and insightful interpretation without unnecessary flattery.
       ${conversationContextSection}
+      ${conversationContextInstruction}
       **User's Question:**
       ${userMessage}
       **Your Interpretation:**
