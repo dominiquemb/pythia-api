@@ -1025,13 +1025,63 @@ app.post("/api/ephemeris", async (req, res) => {
 
 // 7. Chat endpoints
 
+const buildConversationTitle = (message) => {
+  if (!message || typeof message !== "string") return "New Chat";
+  const normalized = message.trim().replace(/\s+/g, " ");
+  if (!normalized) return "New Chat";
+  return normalized.length > 60 ? `${normalized.substring(0, 60)}...` : normalized;
+};
+
+const normalizeJson = (value, fallback) => {
+  if (value === undefined || value === null) return JSON.stringify(fallback);
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+};
+
+const parseJsonSafely = (value, fallback) => {
+  if (!value) return fallback;
+  try {
+    return typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    return fallback;
+  }
+};
+
+const resolveConversationId = async (
+  conn,
+  { userId, conversationId, userMessage, createIfMissing = true }
+) => {
+  if (conversationId) {
+    const normalizedConversationId = Number(conversationId);
+    if (!Number.isInteger(normalizedConversationId) || normalizedConversationId <= 0) {
+      throw new Error("conversationId must be a valid integer");
+    }
+    const existingConversation = await conn.query(
+      "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+      [normalizedConversationId, userId]
+    );
+    if (existingConversation.length === 0) {
+      throw new Error("Conversation not found");
+    }
+    return normalizedConversationId;
+  }
+
+  if (!createIfMissing) return null;
+
+  const createConversationResult = await conn.query(
+    "INSERT INTO conversations (user_id, title) VALUES (?, ?)",
+    [userId, buildConversationTitle(userMessage)]
+  );
+  return Number(createConversationResult.insertId);
+};
+
 // POST /api/chat - Submit a chat message and get AI response
 app.post("/api/chat", async (req, res) => {
   let conn;
   const { authorization } = req.headers;
   const {
     userId,
-    sessionKey,
+    conversationId,
     userMessage,
     chartData,
     saveToHistory = true,
@@ -1064,10 +1114,6 @@ app.post("/api/chat", async (req, res) => {
     // === 2. VALIDATION ===
     if (!userMessage || !userMessage.trim()) {
       return res.status(400).json({ error: "userMessage is required" });
-    }
-
-    if (!sessionKey) {
-      return res.status(400).json({ error: "sessionKey is required" });
     }
 
     // === 3. RATE LIMITING (existing pattern from /api/query) ===
@@ -1238,10 +1284,18 @@ Provide a detailed, insightful astrological interpretation. Since no specific bi
 
     // === 7. SAVE TO DATABASE (if requested) ===
     let messageId = null;
+    let targetConversationId = conversationId || null;
     if (saveToHistory) {
+      targetConversationId = await resolveConversationId(conn, {
+        userId,
+        conversationId,
+        userMessage,
+        createIfMissing: true,
+      });
+
       const insertQuery = `
         INSERT INTO chat_messages
-        (user_id, session_key, user_message, assistant_response, event_ids_used, query_metadata, is_saved)
+        (user_id, conversation_id, user_message, assistant_response, event_ids_used, query_metadata, is_saved)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `;
 
@@ -1255,7 +1309,7 @@ Provide a detailed, insightful astrological interpretation. Since no specific bi
 
       const insertResult = await conn.query(insertQuery, [
         userId,
-        sessionKey,
+        targetConversationId,
         userMessage,
         text,
         JSON.stringify(eventIdsUsed),
@@ -1289,6 +1343,7 @@ Provide a detailed, insightful astrological interpretation. Since no specific bi
     res.json({
       response: text,
       messageId: messageId,
+      conversationId: targetConversationId,
       saved: saveToHistory
     });
 
@@ -1300,16 +1355,15 @@ Provide a detailed, insightful astrological interpretation. Since no specific bi
   }
 });
 
-// GET /api/chat/:userId/:sessionKey - Retrieve all messages for a specific chat session
-app.get("/api/chat/:userId/:sessionKey", async (req, res) => {
+// GET /api/chat/:userId/conversation/:conversationId - Retrieve all messages for a conversation
+app.get("/api/chat/:userId/conversation/:conversationId", async (req, res) => {
   let conn;
   const { authorization } = req.headers;
-  const { userId, sessionKey } = req.params;
+  const { userId, conversationId } = req.params;
   const limit = parseInt(req.query.limit) || 50;
   const offset = parseInt(req.query.offset) || 0;
 
   try {
-    // === AUTHENTICATION ===
     if (!authorization) {
       return res.status(400).json({ error: "Missing JWT token" });
     }
@@ -1325,46 +1379,61 @@ app.get("/api/chat/:userId/:sessionKey", async (req, res) => {
       });
     }
 
-    // === FETCH MESSAGES ===
+    const normalizedConversationId = Number(conversationId);
+    if (!Number.isInteger(normalizedConversationId) || normalizedConversationId <= 0) {
+      return res.status(400).json({ error: "conversationId must be a valid integer" });
+    }
+
     conn = await pool.getConnection();
+
+    const ownershipCheck = await conn.query(
+      "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+      [normalizedConversationId, userId]
+    );
+    if (ownershipCheck.length === 0) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
 
     const messagesQuery = `
       SELECT
         message_id as messageId,
+        conversation_id as conversationId,
         user_message as userMessage,
         assistant_response as assistantResponse,
+        user_message_encrypted as userMessageEncrypted,
+        assistant_response_encrypted as assistantResponseEncrypted,
+        encryption_iv_user as encryptionIVUser,
+        encryption_iv_assistant as encryptionIVAssistant,
+        is_encrypted as isEncrypted,
         event_ids_used as eventIdsUsed,
         created_at as createdAt
       FROM chat_messages
-      WHERE user_id = ? AND session_key = ? AND is_saved = TRUE
+      WHERE user_id = ? AND conversation_id = ? AND is_saved = TRUE
       ORDER BY created_at ASC
       LIMIT ? OFFSET ?
     `;
 
-    const messages = await conn.query(messagesQuery, [userId, sessionKey, limit, offset]);
-
-    // Parse JSON fields
-    const formattedMessages = messages.map(msg => ({
+    const messages = await conn.query(messagesQuery, [userId, normalizedConversationId, limit, offset]);
+    const formattedMessages = messages.map((msg) => ({
       ...msg,
-      eventIdsUsed: JSON.parse(msg.eventIdsUsed)
+      eventIdsUsed: parseJsonSafely(msg.eventIdsUsed, [])
     }));
 
-    // Get total count
     const countQuery = `
       SELECT COUNT(*) as total
       FROM chat_messages
-      WHERE user_id = ? AND session_key = ? AND is_saved = TRUE
+      WHERE user_id = ? AND conversation_id = ? AND is_saved = TRUE
     `;
-    const countResult = await conn.query(countQuery, [userId, sessionKey]);
+    const countResult = await conn.query(countQuery, [userId, normalizedConversationId]);
     const total = countResult[0]?.total || 0;
 
     res.json({
+      conversationId: normalizedConversationId,
       messages: formattedMessages,
-      total: total
+      total
     });
-
   } catch (err) {
-    console.error("Get chat history error:", err.message);
+    console.error("Get conversation chat history error:", err.message);
     res.status(500).json({ error: err.message });
   } finally {
     if (conn) conn.release();
@@ -1397,31 +1466,30 @@ app.get("/api/chat-sessions/:userId", async (req, res) => {
 
     const sessionsQuery = `
       SELECT
-        session_key as sessionKey,
-        event_ids_used as eventIds,
-        COUNT(*) as messageCount,
-        MAX(created_at) as lastMessageAt
-      FROM chat_messages
-      WHERE user_id = ? AND is_saved = TRUE
-      GROUP BY session_key
-      ORDER BY lastMessageAt DESC
+        c.id as conversationId,
+        c.title as title,
+        c.created_at as createdAt,
+        MAX(m.created_at) as lastMessageAt,
+        COUNT(m.message_id) as messageCount
+      FROM conversations c
+      LEFT JOIN chat_messages m
+        ON m.conversation_id = c.id AND m.is_saved = TRUE
+      WHERE c.user_id = ?
+      GROUP BY c.id, c.title, c.created_at
+      ORDER BY COALESCE(lastMessageAt, c.created_at) DESC
     `;
 
     const sessions = await conn.query(sessionsQuery, [userId]);
 
-    // Parse event IDs and format
-    const formattedSessions = sessions.map(session => {
-      const eventIds = JSON.parse(session.eventIds);
-
-      return {
-        sessionKey: session.sessionKey,
-        eventIds: eventIds,
-        messageCount: session.messageCount,
-        lastMessageAt: session.lastMessageAt
-      };
+    res.json({
+      sessions: sessions.map((session) => ({
+        conversationId: Number(session.conversationId),
+        title: session.title || "New Chat",
+        createdAt: session.createdAt,
+        lastMessageAt: session.lastMessageAt,
+        messageCount: Number(session.messageCount) || 0
+      }))
     });
-
-    res.json({ sessions: formattedSessions });
 
   } catch (err) {
     console.error("Get sessions error:", err.message);
@@ -1484,11 +1552,78 @@ app.delete("/api/chat/:messageId", async (req, res) => {
   }
 });
 
-// DELETE /api/chat-session/:userId/:sessionKey - Clear entire chat session
-app.delete("/api/chat-session/:userId/:sessionKey", async (req, res) => {
+// DELETE /api/chat-conversation/:userId/:conversationId - Clear entire conversation
+app.delete("/api/chat-conversation/:userId/:conversationId", async (req, res) => {
   let conn;
   const { authorization } = req.headers;
-  const { userId, sessionKey } = req.params;
+  const { userId, conversationId } = req.params;
+
+  try {
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const normalizedConversationId = Number(conversationId);
+    if (!Number.isInteger(normalizedConversationId) || normalizedConversationId <= 0) {
+      return res.status(400).json({ error: "conversationId must be a valid integer" });
+    }
+
+    conn = await pool.getConnection();
+
+    const ownershipCheck = await conn.query(
+      "SELECT id FROM conversations WHERE id = ? AND user_id = ?",
+      [normalizedConversationId, userId]
+    );
+    if (ownershipCheck.length === 0) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    const deleteMessagesResult = await conn.query(
+      "DELETE FROM chat_messages WHERE user_id = ? AND conversation_id = ?",
+      [userId, normalizedConversationId]
+    );
+
+    await conn.query(
+      "UPDATE conversations SET updated_at = NOW() WHERE id = ?",
+      [normalizedConversationId]
+    );
+
+    res.json({
+      success: true,
+      deletedCount: deleteMessagesResult.affectedRows,
+      message: "Conversation cleared successfully"
+    });
+  } catch (err) {
+    console.error("Delete conversation error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// 8. Encryption endpoints
+
+// POST /api/crypto/init-keys - Initialize encryption keys for a user
+app.post("/api/crypto/init-keys", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const {
+    userId,
+    encryptedMasterKey,
+    keyDerivationSalt,
+    masterKeyIV,
+    encryptedMasterKeyRecovery,
+    recoveryKeyIV
+  } = req.body;
 
   try {
     // === AUTHENTICATION ===
@@ -1505,30 +1640,164 @@ app.delete("/api/chat-session/:userId/:sessionKey", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    // === DELETE SESSION ===
+    // === CHECK IF KEYS ALREADY EXIST ===
     conn = await pool.getConnection();
+    const existing = await conn.query(
+      "SELECT key_id FROM user_encryption_keys WHERE user_id = ?",
+      [userId]
+    );
 
-    const deleteQuery = `
-      DELETE FROM chat_messages
-      WHERE user_id = ? AND session_key = ?
-    `;
-    const result = await conn.query(deleteQuery, [userId, sessionKey]);
+    if (existing.length > 0) {
+      conn.release();
+      return res.status(400).json({ error: "Encryption keys already initialized" });
+    }
 
-    res.json({
-      success: true,
-      deletedCount: result.affectedRows,
-      message: "Chat session cleared successfully"
-    });
+    // === INSERT ENCRYPTION KEYS ===
+    await conn.query(
+      `INSERT INTO user_encryption_keys
+       (user_id, encrypted_master_key, key_derivation_salt, master_key_iv,
+        encrypted_master_key_recovery, recovery_key_iv, key_version)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [userId, encryptedMasterKey, keyDerivationSalt, masterKeyIV,
+       encryptedMasterKeyRecovery, recoveryKeyIV]
+    );
+
+    res.json({ success: true, message: "Encryption keys initialized" });
 
   } catch (err) {
-    console.error("Delete session error:", err.message);
+    console.error("Init keys error:", err);
     res.status(500).json({ error: err.message });
   } finally {
     if (conn) conn.release();
   }
 });
 
-// 8. Start the server
+// GET /api/crypto/keys/:userId - Retrieve encrypted key material
+app.get("/api/crypto/keys/:userId", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const { userId } = req.params;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // === FETCH ENCRYPTION KEYS ===
+    conn = await pool.getConnection();
+    const keys = await conn.query(
+      `SELECT encrypted_master_key, key_derivation_salt, master_key_iv,
+              key_version, encrypted_master_key_recovery, recovery_key_iv
+       FROM user_encryption_keys WHERE user_id = ?`,
+      [userId]
+    );
+
+    if (keys.length === 0) {
+      return res.json({ exists: false });
+    }
+
+    res.json({
+      exists: true,
+      encryptedMasterKey: keys[0].encrypted_master_key,
+      keyDerivationSalt: keys[0].key_derivation_salt,
+      masterKeyIV: keys[0].master_key_iv,
+      keyVersion: keys[0].key_version,
+      encryptedMasterKeyRecovery: keys[0].encrypted_master_key_recovery,
+      recoveryKeyIV: keys[0].recovery_key_iv
+    });
+
+  } catch (err) {
+    console.error("Get keys error:", err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST /api/chat/save-encrypted - Save encrypted messages
+app.post("/api/chat/save-encrypted", async (req, res) => {
+  let conn;
+  const { authorization } = req.headers;
+  const {
+    userId,
+    conversationId,
+    userMessageEncrypted,
+    assistantResponseEncrypted,
+    encryptionIVUser,
+    encryptionIVAssistant,
+    eventIdsUsed,
+    queryMetadata
+  } = req.body;
+
+  try {
+    // === AUTHENTICATION ===
+    if (!authorization) {
+      return res.status(400).json({ error: "Missing JWT token" });
+    }
+
+    const verified = await supabase.auth.getUser(authorization);
+    if (!verified?.data?.user) {
+      return res.status(400).json({ error: "Invalid JWT token" });
+    }
+
+    if (verified.data.user.id !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    // === INSERT ENCRYPTED MESSAGE ===
+    conn = await pool.getConnection();
+    const targetConversationId = await resolveConversationId(conn, {
+      userId,
+      conversationId,
+      userMessage: "Encrypted message",
+      createIfMissing: true,
+    });
+
+    const insertQuery = `
+      INSERT INTO chat_messages
+      (user_id, conversation_id, user_message, assistant_response,
+       user_message_encrypted, assistant_response_encrypted,
+       encryption_iv_user, encryption_iv_assistant,
+       event_ids_used, query_metadata, is_encrypted, is_saved)
+      VALUES (?, ?, '', '', ?, ?, ?, ?, ?, ?, TRUE, TRUE)
+    `;
+
+    const result = await conn.query(insertQuery, [
+      userId,
+      targetConversationId,
+      userMessageEncrypted,
+      assistantResponseEncrypted,
+      encryptionIVUser,
+      encryptionIVAssistant,
+      normalizeJson(eventIdsUsed, []),
+      normalizeJson(queryMetadata, {})
+    ]);
+
+    res.json({
+      success: true,
+      messageId: result.insertId,
+      conversationId: targetConversationId
+    });
+
+  } catch (err) {
+    console.error("Save encrypted chat error:", err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// 9. Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 
