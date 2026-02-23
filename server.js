@@ -1116,7 +1116,7 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "userMessage is required" });
     }
 
-    // === 3. RATE LIMITING (existing pattern from /api/query) ===
+    // === 3. RATE LIMITING ===
     conn = await pool.getConnection();
 
     const checkQuery = `SELECT queries_today, last_query_timestamp FROM user_query_stats WHERE user_id = ?`;
@@ -1127,10 +1127,10 @@ app.post("/api/chat", async (req, res) => {
       const lastQueryDay = new Date(lastQueryTimestamp).toDateString();
       const today = new Date().toDateString();
 
-      if (today === lastQueryDay && userStats[0].queries_today >= 5) {
+      if (today === lastQueryDay && userStats[0].queries_today >= 30) {
         conn.release();
         return res.status(429).json({
-          error: "Query limit of 5 per day reached. Please try again tomorrow."
+          error: "Query limit of 30 per day reached. Please try again tomorrow."
         });
       }
     }
@@ -1146,7 +1146,7 @@ app.post("/api/chat", async (req, res) => {
           : chartData;
         eventIdsUsed = parsedChartData.map(event => event.event_id);
       } catch (err) {
-        conn.release();
+        if (conn) conn.release();
         return res.status(400).json({ error: "Invalid chartData JSON" });
       }
     }
@@ -1476,7 +1476,7 @@ app.get("/api/chat-sessions/:userId", async (req, res) => {
         ON m.conversation_id = c.id AND m.is_saved = TRUE
       WHERE c.user_id = ?
       GROUP BY c.id, c.title, c.created_at
-      ORDER BY COALESCE(lastMessageAt, c.created_at) DESC
+      ORDER BY COALESCE(MAX(m.created_at), c.created_at) DESC
     `;
 
     const sessions = await conn.query(sessionsQuery, [userId]);
