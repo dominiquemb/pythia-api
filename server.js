@@ -1291,13 +1291,16 @@ app.post("/api/chat", async (req, res) => {
     // === 7. SAVE TO DATABASE (if requested) ===
     let messageId = null;
     let targetConversationId = conversationId || null;
-    if (saveToHistory) {
+    if (saveToHistory || !targetConversationId) {
       targetConversationId = await resolveConversationId(conn, {
         userId,
         conversationId,
         userMessage,
         createIfMissing: true,
       });
+    }
+
+    if (saveToHistory) {
 
       const insertQuery = `
         INSERT INTO chat_messages
@@ -1737,6 +1740,7 @@ app.post("/api/chat/save-encrypted", async (req, res) => {
   const {
     userId,
     conversationId,
+    conversationTitle,
     userMessageEncrypted,
     assistantResponseEncrypted,
     encryptionIVUser,
@@ -1765,7 +1769,7 @@ app.post("/api/chat/save-encrypted", async (req, res) => {
     const targetConversationId = await resolveConversationId(conn, {
       userId,
       conversationId,
-      userMessage: "Encrypted message",
+      userMessage: conversationTitle || "Encrypted message",
       createIfMissing: true,
     });
 
