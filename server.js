@@ -1312,6 +1312,7 @@ Assistant: ${assistantText}`;
       ? `
       You are an expert astrologer with deep knowledge of various astrological techniques including natal charts, synastry, composite charts, progressed charts, astrocartography, and zodiacal releasing.
       Analyze the following astrological data and answer the user's question based on it. Provide a thoughtful, detailed, and insightful interpretation without unnecessary flattery.
+      IMPORTANT: Specific chart data is provided below. Do NOT claim that no chart data was provided.
       **Astrological Data:**
       ---
       ${finalChartDataString}
