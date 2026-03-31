@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+set -e
+
+echo "🗄️ Checking whether outgoing migrations require a fresh dump..."
+bash scripts/pre-push-migration-dump.sh "$1"
+
+echo ""
+echo "✅ Pre-push migration dump check passed."
+echo ""

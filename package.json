@@ -1,4 +1,9 @@
 {
+  "scripts": {
+    "prepare": "husky",
+    "migrate": "node scripts/run-migrations.js",
+    "migrate:baseline": "node scripts/run-migrations.js --baseline latest"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.55.0",
     "axios": "^1.11.0",
@@ -9,5 +14,8 @@
     "mariadb": "^3.4.5",
     "node-fetch": "^3.3.2",
     "swisseph": "^0.5.17"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
   }
 }
