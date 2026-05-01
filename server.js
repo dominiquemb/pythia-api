@@ -1110,6 +1110,11 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (verified.data.user.id !== userId) {
+      console.error("Chat auth mismatch:", {
+        jwtUserId: verified.data.user.id,
+        requestUserId: userId,
+        conversationId,
+      });
       return res.status(403).json({
         error: "Forbidden: You can only request your own data."
       });
@@ -1378,8 +1383,26 @@ app.post("/api/chat", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Chat endpoint error:", err.message);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    const statusCode = Number.isInteger(err?.response?.status)
+      ? err.response.status
+      : Number.isInteger(err?.status)
+        ? err.status
+        : 500;
+
+    const responseMessage =
+      err?.response?.data?.error?.message ||
+      err?.response?.data?.error ||
+      err?.response?.data?.message ||
+      err?.message ||
+      "Internal server error";
+
+    console.error("Chat endpoint error:", {
+      statusCode,
+      message: responseMessage,
+      upstreamData: err?.response?.data || null,
+    });
+
+    res.status(statusCode).json({ error: responseMessage });
   } finally {
     if (conn) conn.release();
   }
