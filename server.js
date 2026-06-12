@@ -16,6 +16,7 @@ const supabase = createClient(supabaseUrl, process.env.SUPABASE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 3002; // Use a port from .env or default to 3002
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
+const DAILY_QUERY_LIMIT = Number(process.env.DAILY_QUERY_LIMIT || 40);
 
 // 3. Middleware setup
 app.use(cors()); // Enable Cross-Origin Resource Sharing for your React app
@@ -915,11 +916,11 @@ app.post("/api/query", async (req, res) => {
       const lastQueryDay = new Date(
         userStats[0].last_query_timestamp
       ).toDateString();
-      if (today === lastQueryDay && userStats[0].queries_today >= 30) {
+      if (today === lastQueryDay && userStats[0].queries_today >= DAILY_QUERY_LIMIT) {
         if (conn) conn.release();
         return res
           .status(429)
-          .json({ error: "Query limit of 30 per day reached." });
+          .json({ error: `Query limit of ${DAILY_QUERY_LIMIT} per day reached.` });
       }
     }
 
@@ -1136,10 +1137,10 @@ app.post("/api/chat", async (req, res) => {
       const lastQueryDay = new Date(lastQueryTimestamp).toDateString();
       const today = new Date().toDateString();
 
-      if (today === lastQueryDay && userStats[0].queries_today >= 30) {
+      if (today === lastQueryDay && userStats[0].queries_today >= DAILY_QUERY_LIMIT) {
         conn.release();
         return res.status(429).json({
-          error: "Query limit of 30 per day reached. Please try again tomorrow."
+          error: `Query limit of ${DAILY_QUERY_LIMIT} per day reached. Please try again tomorrow.`
         });
       }
     }
