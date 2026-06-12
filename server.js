@@ -16,7 +16,7 @@ const supabase = createClient(supabaseUrl, process.env.SUPABASE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 3002; // Use a port from .env or default to 3002
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "25mb";
-const DAILY_QUERY_LIMIT = Number(process.env.DAILY_QUERY_LIMIT || 40);
+const DAILY_QUERY_LIMIT = Number(process.env.DAILY_QUERY_LIMIT || 60);
 
 // 3. Middleware setup
 app.use(cors()); // Enable Cross-Origin Resource Sharing for your React app
