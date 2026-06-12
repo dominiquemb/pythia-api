@@ -35,7 +35,7 @@ if (( applied_migrations > 0 )); then
 fi
 
 echo "Restarting PM2 process (name: astrology-api)..."
-pm2 restart astrology-api
+pm2 restart astrology-api --update-env
 
 echo "Deployment complete! Current PM2 status:"
 pm2 list
